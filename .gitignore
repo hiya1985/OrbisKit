@@ -1,0 +1,10 @@
+# build output
+build/
+eboot.bin
+pkg.gp4
+*.pkg
+
+# generated or copied from the OpenOrbis toolchain by build.ps1
+sce_sys/param.sfo
+sce_sys/about/
+sce_module/
