@@ -8,3 +8,8 @@ pkg.gp4
 sce_sys/param.sfo
 sce_sys/about/
 sce_module/
+
+# local only (not on GitHub): notes, release copies, test scripts (contain the PS4's IP)
+notes/
+release/
+tests/
