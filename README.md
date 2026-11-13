@@ -6,6 +6,19 @@ OpenOrbis toolchain.
 **[Download the latest .pkg from Releases](https://github.com/hiya1985/OrbisKit/releases/latest)**.
 Needs a jailbroken PS4 with GoldHEN loaded (tested on firmware 11.00). See [Installing](#installing).
 
+**[Watch the demo video](https://github.com/hiya1985/OrbisKit/releases/download/v1.02/OrbisKit-demo.mp4)**
+(40 s, recorded on a PS4 running 1.02).
+
+| | |
+|---|---|
+| ![Home dashboard](docs/tv-home.png) | ![File manager](docs/tv-files.png) |
+| ![Installed apps](docs/tv-apps.png) | ![Payloads](docs/tv-payloads.png) |
+| ![Tools](docs/tv-tools.png) | ![Settings and themes](docs/tv-themes.png) |
+
+Web file manager, opened from a PC browser:
+
+![Web file manager](docs/web-files.png)
+
 | Tab | What it does |
 |-----|--------------|
 | **Home** | Dashboard with server status, uptime, an installed-app summary and 8 quick-action tiles (2 rows of 4). X runs a tile. Triangle picks a tile's action from a list (servers, Files/Apps/Tools/Settings, USB, internal storage, `/data`, payloads, backups, capture sync, largest files, sandbox escape, next theme) or empties it. *Reset all tiles to default* is in the same menu. |
