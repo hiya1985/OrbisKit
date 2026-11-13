@@ -6,8 +6,8 @@ OpenOrbis toolchain.
 **[Download the latest .pkg from Releases](https://github.com/hiya1985/OrbisKit/releases/latest)**.
 Needs a jailbroken PS4 with GoldHEN loaded (tested on firmware 11.00). See [Installing](#installing).
 
-**[Watch the demo video](https://github.com/hiya1985/OrbisKit/releases/download/v1.02/OrbisKit-demo.mp4)**
-(40 s, recorded on a PS4 running 1.02).
+**[Watch the demo on YouTube](https://www.youtube.com/watch?v=h274K0meGJM)** (40 s, recorded on a PS4 running 1.02)
+or [download the video](https://github.com/hiya1985/OrbisKit/releases/download/v1.02/OrbisKit-demo.mp4).
 
 | | |
 |---|---|
