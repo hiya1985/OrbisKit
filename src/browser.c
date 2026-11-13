@@ -41,9 +41,9 @@ int browser_load(Browser *b, const char *path)
         Entry *e = &b->e[b->count++];
         memset(e, 0, sizeof *e);
         snprintf(e->name, sizeof e->name, "%s", de->d_name);
-        path_join(full, sizeof full, path, de->d_name);
         struct kstat st;
-        if (k_stat(full, &st) == 0) {
+        /* a cut-off path is a different file: don't show its size/date */
+        if (!path_join(full, sizeof full, path, de->d_name) && k_stat(full, &st) == 0) {
             e->is_dir = S_ISDIR(st.st_mode);
             e->size = st.st_size;
             e->mtime = st.st_mtime;

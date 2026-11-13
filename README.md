@@ -98,7 +98,7 @@ send it with GoldHEN's remote package installer.
   L2 toggles shift, R2 toggles symbols, Options confirms and O cancels.
 - File viewer: Square switches between text and hex. Files over 4 MB show only the first 4 MB.
 - Picture viewer: X on a picture opens it. Left/Right (or L1/R1) moves through the folder,
-  Triangle hides the info bar and O closes it. The limit is about 25 megapixels.
+  Triangle hides the info bar and O closes it. The limit is 16 megapixels.
 - Zip: each archive is extracted into a new folder named after it. Stored and deflate entries
   are supported. Zip64, encrypted entries and single files over 256 MB are not.
 - Zip creation compresses files up to 64 MB and stores larger ones uncompressed. Archives

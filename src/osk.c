@@ -50,11 +50,39 @@ static void type_char(char c)
     k.text[k.cursor++] = c;
 }
 
+/* The text is UTF-8 (a file name like "é" or "日本" is 2-3 bytes per character): the cursor
+ * must move and delete whole characters, never stop inside one. */
+#define CONT(c) (((unsigned char)(c) & 0xC0) == 0x80)
+static int char_start_before(int pos)
+{
+    if (pos <= 0) return 0;
+    pos--;
+    while (pos > 0 && CONT(k.text[pos])) pos--;
+    return pos;
+}
+
+static int char_end_after(int pos)
+{
+    int len = (int)strlen(k.text);
+    if (pos >= len) return len;
+    pos++;
+    while (pos < len && CONT(k.text[pos])) pos++;
+    return pos;
+}
+
+static int glyphs(int from, int to)
+{
+    int n = 0;
+    for (int i = from; i < to; i++) if (!CONT(k.text[i])) n++;
+    return n;
+}
+
 static void backspace(void)
 {
     if (!k.cursor) return;
-    memmove(k.text + k.cursor - 1, k.text + k.cursor, strlen(k.text) - k.cursor + 1);
-    k.cursor--;
+    int p = char_start_before(k.cursor);
+    memmove(k.text + p, k.text + k.cursor, strlen(k.text) - k.cursor + 1);
+    k.cursor = p;
 }
 
 static int finish(int ok)
@@ -83,8 +111,8 @@ int osk_update(void)
     }
 
     int len = (int)strlen(k.text);
-    if (pad_pressed(BTN_L1) && k.cursor > 0) k.cursor--;
-    if (pad_pressed(BTN_R1) && k.cursor < len) k.cursor++;
+    if (pad_pressed(BTN_L1) && k.cursor > 0) k.cursor = char_start_before(k.cursor);
+    if (pad_pressed(BTN_R1) && k.cursor < len) k.cursor = char_end_after(k.cursor);
     if (pad_pressed(BTN_SQUARE)) backspace();
     if (pad_pressed(BTN_TRIANGLE)) type_char(' ');
     if (pad_pressed(BTN_L2)) k.layout = (k.layout == LAY_UPPER) ? LAY_LOWER : LAY_UPPER;
@@ -129,6 +157,7 @@ void osk_draw(void)
     int start = 0;
     if (k.cursor > visible - 4) start = k.cursor - (visible - 4);
     if (start > len) start = len;
+    while (start > 0 && CONT(k.text[start])) start--;   /* begin on a whole character */
     char shown[256];
     int n = len - start < visible ? len - start : visible;
     if (n > (int)sizeof shown - 1) n = sizeof shown - 1;
@@ -136,7 +165,7 @@ void osk_draw(void)
     shown[n] = 0;
     gfx_text(x + 56, y + 81, shown, 0xFFE8ECEF, 0);
     if ((k.blink / 30) % 2 == 0)
-        gfx_rect(x + 56 + (k.cursor - start) * fw - 1, y + 82, 3, gfx_font_h() - 4, 0xFF3A7BD5);
+        gfx_rect(x + 56 + glyphs(start, k.cursor) * fw - 1, y + 82, 3, gfx_font_h() - 4, 0xFF3A7BD5);
 
     int gy = y + 150;
     for (int r = 0; r < ROWS; r++) {

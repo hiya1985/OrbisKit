@@ -2,6 +2,7 @@
  * Tabs: Home | Files | Apps | Network | Payloads | System | Tools | Settings
  * L1/R1 switch tabs. See README.md for controls. */
 #include <errno.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -157,7 +158,7 @@ static char app_paths[5][256];
 /* search results view (Files tab) */
 static int sr_active, sr_sel, sr_scroll;
 static int sr_big;          /* results are "largest files" rather than a name search */
-static char sr_query[64], sr_root[1024];
+static char sr_query[256], sr_root[1024];
 
 #define MENU_MAX 32
 #define MENU_VISIBLE 15
@@ -292,6 +293,16 @@ static const char *usb_root(void)
     return NULL;
 }
 
+/* For drawing: usb_root() opens and stats the drives, too slow to run 60 times a second
+ * (a slow or disconnecting drive would stall the screen). Checked every ~2 s instead. */
+static const char *usb_root_cached(void)
+{
+    static const char *c;
+    static int at = -1000;
+    if (frame - at >= 120 || frame < at) { c = usb_root(); at = frame; }
+    return c;
+}
+
 static void timestamp(char *out, int n)
 {
     time_t t = time(NULL);
@@ -346,14 +357,14 @@ static void do_action(int act)
     case ACT_VIEW: {
         if (!br.count) break;
         char p[1024], err[128];
-        path_join(p, sizeof p, br.path, br.e[br.sel].name);
+        if (path_join(p, sizeof p, br.path, br.e[br.sel].name)) { toast(C_RED, "Path too long"); break; }
         if (viewer_open(p, err, sizeof err) != 0) toast(C_RED, "%s", err);
         break;
     }
     case ACT_VIEWIMG: {
         if (!br.count) break;
         char p[1024], err[160];
-        path_join(p, sizeof p, br.path, br.e[br.sel].name);
+        if (path_join(p, sizeof p, br.path, br.e[br.sel].name)) { toast(C_RED, "Path too long"); break; }
         if (imgview_open(p, err, sizeof err) != 0) toast(C_RED, "%s", err);
         break;
     }
@@ -431,7 +442,7 @@ static void do_action(int act)
     case ACT_HASH: {
         if (!br.count || br.e[br.sel].is_dir) break;
         char p[1024];
-        path_join(p, sizeof p, br.path, br.e[br.sel].name);
+        if (path_join(p, sizeof p, br.path, br.e[br.sel].name)) { toast(C_RED, "Path too long"); break; }
         char *one[1] = { p };
         tv_job(JOB_HASH, one, 1, NULL);
         break;
@@ -457,7 +468,7 @@ static void do_action(int act)
         if (!br.count) break;
         Entry *e = &br.e[br.sel];
         char p[1024], sz[32], tb[64];
-        path_join(p, sizeof p, br.path, e->name);
+        if (path_join(p, sizeof p, br.path, e->name)) { toast(C_RED, "Path too long"); break; }
         fmt_size(sz, sizeof sz, e->size);
         struct tm tm;
         localtime_r(&e->mtime, &tm);
@@ -475,7 +486,7 @@ static void do_action(int act)
     case ACT_SENDPAYLOAD: {
         if (!br.count) break;
         char p[1024], err[160];
-        path_join(p, sizeof p, br.path, br.e[br.sel].name);
+        if (path_join(p, sizeof p, br.path, br.e[br.sel].name)) { toast(C_RED, "Path too long"); break; }
         if (payload_send(p, err, sizeof err) == 0) toast(C_GREEN, "Payload sent: %s", br.e[br.sel].name);
         else toast(C_RED, "%s", err);
         break;
@@ -509,6 +520,7 @@ static void osk_finished(int purpose, const char *text)
         return;
     }
     char name[256];
+    if (strlen(text) >= sizeof name) { toast(C_RED, "Too long (max %d characters)", (int)sizeof name - 1); return; }
     snprintf(name, sizeof name, "%s", text);
     /* trim spaces at both ends */
     char *s = name;
@@ -707,8 +719,8 @@ static void input_files(void)
         Entry *e = &br.e[br.sel];
         if (e->is_dir) {
             char p[1024];
-            path_join(p, sizeof p, br.path, e->name);
-            if (browser_load(&br, p) != 0) toast(C_RED, "Can't open folder: %s", strerror(br.error));
+            if (path_join(p, sizeof p, br.path, e->name)) toast(C_RED, "Path too long");
+            else if (browser_load(&br, p) != 0) toast(C_RED, "Can't open folder: %s", strerror(br.error));
         } else if (is_image_name(e->name)) {
             do_action(ACT_VIEWIMG);
         } else {
@@ -747,7 +759,7 @@ static void image_step(int dir)
     for (int i = br.sel + dir; i >= 0 && i < br.count; i += dir) {
         if (br.e[i].is_dir || !is_image_name(br.e[i].name)) continue;
         char p[1024], err[160];
-        path_join(p, sizeof p, br.path, br.e[i].name);
+        if (path_join(p, sizeof p, br.path, br.e[i].name)) continue;
         br.sel = i;
         fix_scroll(&br.sel, &br.scroll, br.count, LIST_ROWS);
         if (imgview_open(p, err, sizeof err) != 0) toast(C_RED, "%s", err);
@@ -907,6 +919,7 @@ static void run_item(int id)
         item_adjust(id, 1);
         break;
     case TOOL_BIGSCAN:
+        if (g_job.running || g_job.finished) { toast(C_MARK, "Busy - another job is running. Try again in a moment."); break; }
         if (browser_load(&br, "/user") != 0) { toast(C_RED, "Can't open /user (sandboxed?)"); break; }
         tab = TAB_FILES;
         sr_active = 0;
@@ -1020,16 +1033,18 @@ static void open_tile_menu(void)
     char t[64];
     snprintf(t, sizeof t, "Tile %d: choose an action", home_sel + 1);
     menu_open(t);
-    int cur = tile_action(home_sel);
+    int cur = tile_action(home_sel), sel = 0;
     for (int a = QA_NONE + 1; a < QA_COUNT; a++) {
-        if (QA_RETIRED(a)) continue;
+        if (QA_RETIRED(a)) continue;           /* hidden rows: so row != action id - 1 */
         char lbl[64];
+        if (a == cur) sel = menu.n;            /* start on the current choice */
         snprintf(lbl, sizeof lbl, "%s%s", a == cur ? "> " : "  ", qa_title(a));
         menu_add(lbl, ACT_TILE_SET + a);
     }
-    menu_add("  (empty)", ACT_TILE_SET + QA_NONE);
+    if (cur == QA_NONE) sel = menu.n;
+    menu_add(cur == QA_NONE ? "> (empty)" : "  (empty)", ACT_TILE_SET + QA_NONE);
     menu_add("  Reset all tiles to default", ACT_TILE_RESET);
-    menu.sel = cur > QA_NONE ? cur - 1 : 0;      /* start on the current choice */
+    menu.sel = sel;
     fix_scroll(&menu.sel, &menu.scroll, menu.n, MENU_VISIBLE);
 }
 
@@ -1072,7 +1087,10 @@ static void handle_input(void)
         return;
     }
     if (osk_active()) {
-        if (osk_update() && osk_accepted()) osk_finished(osk_purpose(), osk_text());
+        if (osk_update()) {
+            if (osk_accepted()) osk_finished(osk_purpose(), osk_text());
+            else if (osk_purpose() == OSK_EDITLINE) editor_cancel();
+        }
         return;
     }
     if (editor_active()) {
@@ -1616,7 +1634,7 @@ static void draw_home(void)
     card_kv(x, y0 + 168, cw, "Payloads found", a, C_TEXT);
     card_kv(x, y0 + 216, cw, "Auto payload", cfg.autopayload[0] ? path_base(cfg.autopayload) : "none",
             cfg.autopayload[0] ? C_GREEN : C_DIM);
-    const char *u = usb_root();
+    const char *u = usb_root_cached();
     card_kv(x, y0 + 264, cw, "USB", u ? u + 5 : "not plugged in", u ? C_TEXT : C_DIM);
 
     /* --- quick actions (each tile shows the action chosen for it) --- */
@@ -1744,7 +1762,7 @@ static void draw_overlays(void)
             }
             gfx_text(x + 40, y + 30, buf, C_TEXT, w - 80);
             gfx_text(x + 40, y + 80, g_job.current, C_DIM, w - 80);
-            int pulse = (frame * 12) % (w - 280);
+            int pulse = (int)(((unsigned)frame * 12u) % (unsigned)(w - 280));
             gfx_rect(x + 40, y + 140, w - 80, 30, C_LINE);
             gfx_rect(x + 40 + pulse, y + 140, 200, 30, C_ACCENT);
             gfx_hint(x + w - 40 - gfx_hint_width("[O] Cancel"), y + 190, "[O] Cancel", C_DIM, 0);
@@ -1926,9 +1944,7 @@ static void poll_status(void)
 
     /* remember tab and folder for next launch */
     if (frame % 120 == 60 && (cfg.last_tab != tab || strcmp(cfg.last_path, br.path))) {
-        cfg.last_tab = tab;
-        snprintf(cfg.last_path, sizeof cfg.last_path, "%s", br.path);
-        config_save();
+        config_set_last(tab, br.path);
     }
 
     if (g_job.finished) {
@@ -1939,6 +1955,9 @@ static void poll_status(void)
 
 int main(void)
 {
+    /* first thing: a socket closed mid-send (browser, payload loader) must not kill the app;
+       the auto payload is sent before the web server would set this */
+    signal(SIGPIPE, SIG_IGN);
     dlog_init();
     dlog("OrbisKit " APP_VERSION " starting");
     sceSystemServiceHideSplashScreen();

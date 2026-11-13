@@ -114,6 +114,9 @@ void apps_load_icon_step(void)
         char p[256];
         snprintf(p, sizeof p, "/user/appmeta/%s/icon0.png", a->id);
         int w, h, c;
+        /* a broken or huge icon (e.g. 30000000x1) would need lots of memory and overflow the
+           scaling math below: only real icon sizes are loaded */
+        if (!stbi_info(p, &w, &h, &c) || w <= 0 || h <= 0 || w > 4096 || h > 4096) return;
         unsigned char *px = stbi_load(p, &w, &h, &c, 4);
         if (!px) return;
         uint32_t *ic = malloc(APP_ICON * APP_ICON * 4);
@@ -121,8 +124,8 @@ void apps_load_icon_step(void)
             for (int y = 0; y < APP_ICON; y++) {
                 for (int x = 0; x < APP_ICON; x++) {
                     /* average a small block of source pixels */
-                    int x0 = x * w / APP_ICON, x1 = (x + 1) * w / APP_ICON;
-                    int y0 = y * h / APP_ICON, y1 = (y + 1) * h / APP_ICON;
+                    int x0 = (int)((long long)x * w / APP_ICON), x1 = (int)((long long)(x + 1) * w / APP_ICON);
+                    int y0 = (int)((long long)y * h / APP_ICON), y1 = (int)((long long)(y + 1) * h / APP_ICON);
                     if (x1 <= x0) x1 = x0 + 1;
                     if (y1 <= y0) y1 = y0 + 1;
                     unsigned r = 0, g = 0, b = 0, n = 0;

@@ -73,6 +73,12 @@ static int send_to_port(const void *data, long size, int port, char *err, int er
         snprintf(err, errn, "Loader not reachable on port %d.", port);
         return -1;
     }
+    /* a loader that accepts but stops reading would block the screen forever: give up after 10 s
+       (FreeBSD takes a struct timeval; an int in microseconds is only the fallback) */
+    struct { long sec, usec; } tv = { 10, 0 };
+    int tmo = 10 * 1000000;
+    if (sceNetSetsockopt(s, NET_SOL_SOCKET, 0x1005 /* SO_SNDTIMEO */, &tv, sizeof tv) < 0)
+        sceNetSetsockopt(s, NET_SOL_SOCKET, 0x1005, &tmo, sizeof tmo);
     long off = 0;
     while (off < size) {
         int w = sceNetSend(s, buf + off, size - off, 0);

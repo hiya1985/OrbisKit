@@ -170,24 +170,30 @@ static int zip_add(const char *full, const char *rel)
 
     if (S_ISDIR(st.st_mode)) {
         char dname[1024];
-        snprintf(dname, sizeof dname, "%s/", rel);
+        if (snprintf(dname, sizeof dname, "%s/", rel) >= (int)sizeof dname) { zerr("Name too long: %s", rel); return -1; }
         ZEnt *e = new_ent(dname);
-        if (!e) return -1;
+        if (!e) { zerr("Out of memory: %s", rel); return -1; }
         e->dir = 1;
         dos_time(st.st_mtime, &e->dtime, &e->ddate);
         if (write_local_header(e)) { zfatal = 1; zerr("Write failed (disk full?): %s", rel); return -1; }
         g_job.files_done++;
         DIR *d = opendir(full);
-        if (!d) return 0;
+        if (!d) { zerr("Can't open folder %s", rel); return -1; }   /* its files would be missing */
         struct dirent *de;
         char f2[1024], r2[1024];
         int rc = 0;
-        while ((de = readdir(d)) && !g_job.cancel) {
+        while ((errno = 0, de = readdir(d)) && !g_job.cancel) {
             if (!strcmp(de->d_name, ".") || !strcmp(de->d_name, "..")) continue;
-            path_join(f2, sizeof f2, full, de->d_name);
-            snprintf(r2, sizeof r2, "%s/%s", rel, de->d_name);
+            /* a cut path is another (maybe existing) file: never add it under this name */
+            if (path_join(f2, sizeof f2, full, de->d_name) ||
+                snprintf(r2, sizeof r2, "%s/%s", rel, de->d_name) >= (int)sizeof r2) {
+                zerr("Path too long - skipped: %s", de->d_name);
+                continue;
+            }
             if (zip_add(f2, r2) && g_job.cancel) { rc = -1; break; }
         }
+        /* readdir() also returns NULL on errors (USB pulled): the folder is incomplete */
+        if (!de && errno && !g_job.cancel) { zerr("Read folder failed: %s", rel); rc = -1; }
         closedir(d);
         return rc;
     }
@@ -197,7 +203,7 @@ static int zip_add(const char *full, const char *rel)
     int in = open(full, O_RDONLY, 0);
     if (in < 0) { zerr("Can't open %s", rel); return -1; }
     ZEnt *e = new_ent(rel);
-    if (!e) { close(in); return -1; }
+    if (!e) { close(in); zerr("Out of memory: %s", rel); return -1; }
     dos_time(st.st_mtime, &e->dtime, &e->ddate);
     e->usize = (uint32_t)st.st_size;
     int rc = 0;
@@ -282,7 +288,14 @@ int zip_create(char **src, int nsrc, const char *outpath)
 
     for (int i = 0; i < nsrc && !g_job.cancel && !zfatal; i++) {
         if (!strcmp(src[i], outpath)) continue;
-        zip_add(src[i], path_base(src[i]));
+        /* "/data/a/" would give an empty base and entries named "/..." (absolute paths) */
+        char s[1024];
+        snprintf(s, sizeof s, "%s", src[i]);
+        size_t l = strlen(s);
+        while (l > 1 && s[l - 1] == '/') s[--l] = 0;
+        const char *b = path_base(s);
+        if (!*b || !strcmp(b, ".") || !strcmp(b, "..")) { zerr("Can't zip %s", src[i]); continue; }
+        zip_add(s, b);
     }
 
     int rc = zfatal ? -1 : 0;
@@ -342,7 +355,7 @@ int zip_extract(const char *zippath, const char *dstdir)
     /* find End Of Central Directory record (in the last 64 KB + 22 bytes) */
     long tail = size < 65557 ? size : 65557;
     unsigned char *tb = malloc(tail);
-    if (!tb) { fclose(f); return -1; }
+    if (!tb) { fclose(f); zerr("Out of memory extracting %s", path_base(zippath)); return -1; }
     fseek(f, size - tail, SEEK_SET);
     if ((long)fread(tb, 1, tail, f) != tail) tail = 0;
     long eocd = -1;
@@ -366,7 +379,7 @@ int zip_extract(const char *zippath, const char *dstdir)
     }
     crc_init();
     unsigned char *cd = malloc(cd_size ? cd_size : 1);
-    if (!cd) { fclose(f); return -1; }
+    if (!cd) { fclose(f); zerr("Out of memory extracting %s", path_base(zippath)); return -1; }
     fseek(f, cd_off, SEEK_SET);
     if (fread(cd, 1, cd_size, f) != cd_size) {
         free(cd); fclose(f);

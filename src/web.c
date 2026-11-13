@@ -33,6 +33,8 @@
 #define LOG_N    6
 #define NET_SO_RCVTIMEO 0x1006          /* SceNet: int, microseconds */
 #define NET_SO_SNDTIMEO 0x1005
+#define NET_MSG_PEEK     0x02           /* SceNet recv flags (same values as FreeBSD) */
+#define NET_MSG_DONTWAIT 0x80
 #define RECV_TIMEOUT_US (60 * 1000000)  /* idle client: free its thread instead of waiting forever */
 #define CONN_MAX 32                     /* connection threads at once; more get a 503 */
 
@@ -84,6 +86,53 @@ static int send_all(int s, const void *buf, size_t len)
         len -= w;
     }
     return 0;
+}
+
+/* Browsers send "Sec-Fetch-Site: cross-site" when another website makes the request. */
+static int cross_site(const char *hdr, int hend)
+{
+    for (const char *l = strstr(hdr, "\r\n"); l && l < hdr + hend - 2; l = strstr(l + 2, "\r\n"))
+        if (!strncasecmp(l + 2, "Sec-Fetch-Site:", 15)) {
+            const char *v = l + 17;
+            while (*v == ' ') v++;
+            return !strncasecmp(v, "cross-site", 10);
+        }
+    return 0;
+}
+
+/* Content-Disposition for a download: an ASCII fallback name plus the real UTF-8 name
+ * (RFC 6266/5987), so "日本語.txt" doesn't arrive as "_________.txt". */
+static void disposition(char *out, size_t n, const char *name)
+{
+    char ascii[300], enc[1000];
+    size_t a = 0, e = 0;
+    for (const unsigned char *c = (const unsigned char *)name; *c; c++) {
+        if (a + 1 < sizeof ascii) ascii[a++] = (*c < 32 || *c >= 127 || *c == '"' || *c == '\\') ? '_' : *c;
+        int plain = (*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') || (*c >= '0' && *c <= '9') ||
+                    strchr("!#$&+-.^_`|~", *c);
+        if (plain) { if (e + 1 < sizeof enc) enc[e++] = *c; }
+        else if (e + 3 < sizeof enc) { snprintf(enc + e, 4, "%%%02X", *c); e += 3; }
+    }
+    ascii[a] = 0;
+    enc[e] = 0;
+    snprintf(out, n, "attachment; filename=\"%s\"; filename*=UTF-8''%s", ascii, enc);
+}
+
+static int utf8_valid(const unsigned char *p, size_t n)
+{
+    for (size_t i = 0; i < n; ) {
+        unsigned char c = p[i];
+        size_t k;                                   /* continuation bytes that must follow */
+        if (c < 0x80) k = 0;
+        else if (c >= 0xC2 && c <= 0xDF) k = 1;
+        else if ((c >> 4) == 0xE) k = 2;
+        else if (c >= 0xF0 && c <= 0xF4) k = 3;
+        else return 0;
+        if (i + k >= n && k) return 0;              /* cut off at the end */
+        for (size_t j = 1; j <= k; j++) if ((p[i + j] & 0xC0) != 0x80) return 0;
+        i += k + 1;
+    }
+    return 1;
 }
 
 static int sendf(int s, const char *fmt, ...)
@@ -483,9 +532,9 @@ static void send_listing(int s, const char *dir)
         "async function zipSel(){const ns=picked().map(decodeURIComponent);msg.textContent='Zipping on the PS4...';"
         "try{const r=await fetch('/zipsel?p='+P,{method:'POST',headers:{'X-TBox':'1'},body:ns.join('\\n')});"
         "if(!r.ok){alert(await r.text());msg.textContent='';return}"
-        "const cd=r.headers.get('Content-Disposition')||'',m=cd.match(/filename=\"([^\"]+)\"/);"
+        "const cd=r.headers.get('Content-Disposition')||'',u=cd.match(/filename\\*=UTF-8''([^;]+)/),m=cd.match(/filename=\"([^\"]+)\"/);"
         "const a=document.createElement('a');a.href=URL.createObjectURL(await r.blob());"
-        "a.download=m?m[1]:'selection.zip';document.body.appendChild(a);a.click();a.remove();msg.textContent=''}"
+        "a.download=u?decodeURIComponent(u[1]):m?m[1]:'selection.zip';document.body.appendChild(a);a.click();a.remove();msg.textContent=''}"
         "catch(e){alert('Connection lost');msg.textContent=''}}"
         "</script></body></html>";
     send_all(s, JS, strlen(JS));
@@ -564,7 +613,13 @@ static void zip_and_send(int s, char **src, int n, const char *zipname)
         reply_text(s, 503, "Busy", "The console is busy with another job. Try again in a moment.");
         return;
     }
-    while (g_job.running) sceKernelUsleep(100000);
+    /* the browser can give up while the zip is being made: then stop the job instead of
+       zipping (up to 4 GB) for nobody. recv() of 0 = the other side closed the connection. */
+    for (int t = 0; g_job.running; t++) {
+        sceKernelUsleep(100000);
+        char c;
+        if (t % 10 == 9 && sceNetRecv(s, &c, 1, NET_MSG_PEEK | NET_MSG_DONTWAIT) == 0) g_job.cancel = 1;
+    }
     /* files that couldn't be read are skipped */
     struct kstat st;
     int fd = open_regular(tmp, &st);
@@ -573,12 +628,11 @@ static void zip_and_send(int s, char **src, int n, const char *zipname)
         reply_text(s, 500, "Error", "Zip failed.");
         return;
     }
-    char name[300];
-    snprintf(name, sizeof name, "%s", zipname);
-    for (char *c = name; *c; c++) if (*c == '"' || *c < 32) *c = '_';
+    char disp[1400];
+    disposition(disp, sizeof disp, zipname);
     sendf(s, "HTTP/1.0 200 OK\r\nContent-Type: application/zip\r\nContent-Length: %llu\r\n"
-             "Content-Disposition: attachment; filename=\"%s\"\r\nConnection: close\r\n\r\n",
-          (unsigned long long)st.st_size, name);
+             "Content-Disposition: %s\r\nConnection: close\r\n\r\n",
+          (unsigned long long)st.st_size, disp);
     char *buf = malloc(IO_BUF);
     ssize_t r;
     while (buf && (r = read(fd, buf, IO_BUF)) > 0)
@@ -586,7 +640,7 @@ static void zip_and_send(int s, char **src, int n, const char *zipname)
     free(buf);
     close(fd);
     unlink(tmp);
-    wlog("Zipped and sent %s", name);
+    wlog("Zipped and sent %s", zipname);
 }
 
 static void send_zip(int s, const char *dir)
@@ -645,7 +699,7 @@ static const char *ci_find(const char *h, const char *n)
 }
 
 /* One result row (kept out of the recursive walk so its big buffers aren't on every level). */
-static void search_emit(int s, const char *dir, const char *full, const char *name, int isdir, uint64_t size)
+static int search_emit(int s, const char *dir, const char *full, const char *name, int isdir, uint64_t size)
 {
     char enc[3072], esc[600], penc[3072], pesc[1100], sz[32] = "";
     url_encode(full, enc, sizeof enc);
@@ -653,24 +707,25 @@ static void search_emit(int s, const char *dir, const char *full, const char *na
     url_encode(dir, penc, sizeof penc);
     html_escape(dir, pesc, sizeof pesc);
     if (isdir) {
-        sendf(s, "<tr><td>&#128193; <a href='/?p=%s'>%s</a></td><td class=crumb><a href='/?p=%s'>%s</a></td>"
+        return sendf(s, "<tr><td>&#128193; <a href='/?p=%s'>%s</a></td><td class=crumb><a href='/?p=%s'>%s</a></td>"
                  "<td class=s></td></tr>", enc, esc, penc, pesc);
     } else {
         fmt_size(sz, sizeof sz, size);
-        sendf(s, "<tr><td>&#128196; <a href='/%s?p=%s' target=_blank>%s</a></td><td class=crumb>"
+        return sendf(s, "<tr><td>&#128196; <a href='/%s?p=%s' target=_blank>%s</a></td><td class=crumb>"
                  "<a href='/?p=%s'>%s</a></td><td class=s>%s</td></tr>",
               view_mime(name) ? "view" : "dl", enc, esc, penc, pesc, sz);
     }
 }
 
+/* *found = -1 once the browser is gone: the walk stops instead of scanning the whole drive */
 static void search_walk(int s, const char *dir, const char *q, int *found, int *checked, int depth)
 {
-    if (*found >= WEB_SEARCH_MAX || depth > 32 || !strcmp(dir, "/dev") || !strcmp(dir, "/proc")) return;
+    if (*found < 0 || *found >= WEB_SEARCH_MAX || depth > 32 || !strcmp(dir, "/dev") || !strcmp(dir, "/proc")) return;
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *e;
     char full[1024];
-    while ((e = readdir(d)) && *found < WEB_SEARCH_MAX) {
+    while ((e = readdir(d)) && *found >= 0 && *found < WEB_SEARCH_MAX) {
         if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
         if (path_join(full, sizeof full, dir, e->d_name)) continue;   /* truncated = a parent's name */
         struct kstat st;
@@ -678,7 +733,7 @@ static void search_walk(int s, const char *dir, const char *q, int *found, int *
         (*checked)++;
         int isdir = S_ISDIR(st.st_mode);
         if (ci_find(e->d_name, q)) {
-            search_emit(s, dir, full, e->d_name, isdir, st.st_size);
+            if (search_emit(s, dir, full, e->d_name, isdir, st.st_size)) { *found = -1; break; }
             (*found)++;
         }
         if (isdir) search_walk(s, full, q, found, checked, depth + 1);
@@ -704,6 +759,7 @@ static void send_search(int s, const char *dir, const char *q)
     sendf(s, "<h3>Results for \"%s\" in %s</h3><table>", qesc, desc);
     int found = 0, checked = 0;
     search_walk(s, dir, q, &found, &checked, 0);
+    if (found < 0) return;                  /* the browser disconnected */
     sendf(s, "</table><p style='color:#8995a1'>%d match%s, %d items checked%s</p></main></body></html>",
           found, found == 1 ? "" : "es", checked, found >= WEB_SEARCH_MAX ? " (stopped at 500 results)" : "");
 }
@@ -720,6 +776,7 @@ static void send_view(int s, const char *path, const char *range)
     long long size = st.st_size, start = 0, end = size - 1;
     int partial = 0;
     long long suffix;
+    if (size == 0) range = "";             /* an empty file has no byte range: plain 200 */
     if (range[0] && !strncmp(range, "bytes=-", 7) && sscanf(range + 7, "%lld", &suffix) == 1 && suffix > 0) {
         /* "bytes=-N" = the last N bytes (players use it to read an MP4 index at the end) */
         partial = 1;
@@ -864,6 +921,13 @@ static void send_editor(int s, const char *path)
     if (fd >= 0) close(fd);
     if (!buf || got != st.st_size) { free(buf); reply_text(s, 500, "Error", "Couldn't read the file."); return; }
     if (memchr(buf, 0, got)) { free(buf); reply_text(s, 415, "Binary", "This is a binary file and can't be edited as text."); return; }
+    /* the page is UTF-8: a Latin-1 / Shift-JIS file would have every special character
+       replaced on save, even with no edits */
+    if (!utf8_valid((const unsigned char *)buf, got)) {
+        free(buf);
+        reply_text(s, 415, "Not UTF-8", "This file isn't UTF-8 text, so editing it here would damage it.");
+        return;
+    }
 
     char enc[3072], esc[1024], dir[1024];
     url_encode(path, enc, sizeof enc);
@@ -903,13 +967,17 @@ static void send_editor(int s, const char *path)
 static void receive_save(int s, const char *path, long long clen, const char *pre, int prelen)
 {
     struct kstat st;
-    if (k_stat(path, &st) != 0) { reply_text(s, 404, "Not Found", "File not found."); return; }
+    /* lstat: saving "through" a symlink would replace the link with a file, not edit its target */
+    if (k_lstat(path, &st) != 0) { reply_text(s, 404, "Not Found", "File not found."); return; }
+    if (S_ISLNK(st.st_mode)) { reply_text(s, 403, "Forbidden", "This is a link - open the file it points to."); return; }
     if (!S_ISREG(st.st_mode)) { reply_text(s, 403, "Forbidden", "Not a regular file."); return; }
-    if (clen < 0 || clen > EDIT_MAX) { reply_text(s, 413, "Too Large", "Text too large (2 MB max)."); return; }
+    if (clen < 0) { reply_text(s, 411, "Length Required", "Content-Length required."); return; }
+    if (clen > EDIT_MAX) { reply_text(s, 413, "Too Large", "Text too large (2 MB max)."); return; }
+    static volatile int seq;               /* two saves at once must not share one temp file */
     char tmp[1100], bak[1100];
-    snprintf(tmp, sizeof tmp, "%s.tbox_tmp", path);
+    snprintf(tmp, sizeof tmp, "%s.tbox_tmp%d", path, __sync_add_and_fetch(&seq, 1));
     snprintf(bak, sizeof bak, "%s.bak", path);
-    int fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    int fd = open(tmp, O_WRONLY | O_CREAT | O_EXCL, 0777);
     if (fd < 0) { reply_text(s, 500, "Error", "Can't write in this folder."); return; }
     long long got = 0;
     int ok = 1;
@@ -926,7 +994,8 @@ static void receive_save(int s, const char *path, long long clen, const char *pr
         got += r;
     }
     free(buf);
-    close(fd);
+    if (ok && fsync(fd) != 0) ok = 0;       /* on disk before the rename: survives a power cut */
+    if (close(fd) != 0) ok = 0;
     if (!ok || got != clen) { unlink(tmp); reply_text(s, 500, "Error", "Save failed (connection lost or disk full)."); return; }
     unlink(bak);
     rename(path, bak);                      /* previous version kept as .bak */
@@ -1292,12 +1361,11 @@ static void send_file(int s, const char *path)
     int fd = open_regular(path, &st);
     if (fd == -2) { reply_text(s, 403, "Forbidden", "Not a regular file."); return; }
     if (fd < 0) { reply_text(s, 404, "Not Found", "File not found."); return; }
-    char name[256];
-    snprintf(name, sizeof name, "%s", path_base(path));
-    for (char *c = name; *c; c++) if (*c == '"' || *c < 32) *c = '_';
+    char disp[1400];
+    disposition(disp, sizeof disp, path_base(path));
     sendf(s, "HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\nContent-Length: %llu\r\n"
-             "Content-Disposition: attachment; filename=\"%s\"\r\nConnection: close\r\n\r\n",
-          (unsigned long long)st.st_size, name);
+             "Content-Disposition: %s\r\nConnection: close\r\n\r\n",
+          (unsigned long long)st.st_size, disp);
     char *buf = malloc(IO_BUF);
     ssize_t r;
     while (buf && (r = read(fd, buf, IO_BUF)) > 0)
@@ -1340,9 +1408,11 @@ static void receive_file(int s, const char *dir, const char *name, const char *s
     if (path_join(path, sizeof path, target, name)) { reply_text(s, 400, "Bad Request", "Path too long."); return; }
     /* write to a temporary file and only replace the real one when everything arrived:
        a dropped connection must not destroy an existing file of the same name */
+    /* a unique temp name: two uploads of the same file at once must not write into one file */
+    static volatile int seq;
     char part[1100];
-    snprintf(part, sizeof part, "%s.tbox_part", path);
-    int fd = open(part, O_WRONLY | O_CREAT | O_TRUNC, 0777);
+    snprintf(part, sizeof part, "%s.tbox_part%d", path, __sync_add_and_fetch(&seq, 1));
+    int fd = open(part, O_WRONLY | O_CREAT | O_EXCL, 0777);
     if (fd < 0) { reply_text(s, 500, "Error", strerror(errno)); return; }
 
     long long got = 0;
@@ -1406,6 +1476,16 @@ static void *conn_serve(void *arg)
 
     char method[8] = "", target[2048] = "";
     sscanf(hdr, "%7s %2047s", method, target);
+    {   /* sscanf cuts a longer URL silently: then the last parameter (a name, or the path of a
+           delete) would be a different, shorter one. Refuse it instead. */
+        const char *tp = hdr + strcspn(hdr, " \r\n");
+        while (*tp == ' ') tp++;
+        if (strcspn(tp, " \r\n") >= sizeof target) {
+            reply_text(s, 414, "URI Too Long", "Request too long (path or name too long).");
+            sceNetSocketClose(s);
+            return NULL;
+        }
+    }
     long long clen = -1;
     /* header loops stop before the blank line: l + 2 must never reach the body (hdr + hend),
        or a body starting with "X-TBox:" / "Content-Length:" would count as a header */
@@ -1491,6 +1571,11 @@ static void *conn_serve(void *arg)
         else receive_file(s, p, n, sub, clen, hdr + hend, len - hend);
     } else if (!strcmp(method, "POST") && !strcmp(target, "/zipsel")) {
         receive_zipsel(s, p, clen, hdr + hend, len - hend);
+    } else if (!strcmp(method, "GET") && (!strcmp(target, "/search") || !strcmp(target, "/zip")) &&
+               cross_site(hdr, hend)) {
+        /* another website (e.g. <img src="http://ps4-ip:8080/zip?p=/user">) must not start
+           heavy work; the user typing the URL or our own links are not "cross-site" */
+        reply_text(s, 403, "Forbidden", "Requests from other websites are not allowed.");
     } else if (!strcmp(method, "GET") && !strcmp(target, "/search")) {
         char q[256];
         get_param(query, "q", q, sizeof q);

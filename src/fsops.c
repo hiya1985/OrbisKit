@@ -24,6 +24,7 @@ static int skip_existing;   /* JOB_SYNC: don't recopy files of the same size */
 static char **job_src;
 static int job_nsrc;
 static char job_dst[1024];
+static char job_usb[16];      /* "/mnt/usbN" when the job writes to a USB drive, else "" */
 static char *copybuf;
 
 int path_join(char *out, int n, const char *dir, const char *name)
@@ -91,7 +92,7 @@ static void measure(const char *path, uint64_t *bytes, int *files)
         char sub[1024];
         while ((e = readdir(d))) {
             if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, "..")) continue;
-            path_join(sub, sizeof sub, path, e->d_name);
+            if (path_join(sub, sizeof sub, path, e->d_name)) continue;   /* cut path = another file */
             measure(sub, bytes, files);
         }
         closedir(d);
@@ -114,8 +115,14 @@ static int copy_file(const char *src, const char *dst)
         set_err("Create", dst);
         return -1;
     }
-    int in = open(src, O_RDONLY, 0);
+    /* O_NONBLOCK: a FIFO must not block open() forever (cancel couldn't reach it) */
+    int in = open(src, O_RDONLY | O_NONBLOCK, 0);
     if (in < 0) { set_err("Open", src); return -1; }
+    struct kstat is;
+    if (k_fstat(in, &is) != 0 || !S_ISREG(is.st_mode)) {   /* swapped since the lstat */
+        errno = EINVAL; set_err("Copy (not a regular file)", src); close(in); return -1;
+    }
+    fcntl(in, F_SETFL, 0);
     int out = open(part, O_WRONLY | O_CREAT | O_EXCL, 0777);
     if (out < 0 && errno == EEXIST && unlink(part) == 0)
         out = open(part, O_WRONLY | O_CREAT | O_EXCL, 0777);
@@ -129,7 +136,7 @@ static int copy_file(const char *src, const char *dst)
         ssize_t off = 0;
         while (off < r) {
             ssize_t w = write(out, copybuf + off, r - off);
-            if (w <= 0) { set_err("Write", dst); rc = -1; break; }
+            if (w <= 0) { if (w == 0) errno = ENOSPC; set_err("Write", dst); rc = -1; break; }
             off += w;
         }
         if (rc) break;
@@ -143,15 +150,34 @@ static int copy_file(const char *src, const char *dst)
     return rc;
 }
 
+/* The USB drive the job writes to was pulled: stop the whole job with a clear message
+ * instead of walking the rest of the source tree and failing every file. */
+static int usb_gone(void)
+{
+    if (!job_usb[0] || is_mount_point(job_usb)) return 0;
+    g_job.cancel = 1;
+    g_job.errors++;
+    snprintf(g_job.err, sizeof g_job.err, "USB drive removed - job stopped");
+    return 1;
+}
+
 static int copy_rec(const char *src, const char *dst)
 {
     if (g_job.cancel) return -1;
+    if ((g_job.files_done & 63) == 0 && usb_gone()) return -1;
     struct kstat st;
     if (k_lstat(src, &st) != 0) { set_err("Stat", src); return -1; }
     snprintf(g_job.current, sizeof g_job.current, "%s", src);
     int rc = 0;
     if (S_ISDIR(st.st_mode)) {
-        if (mkdir(dst, 0777) != 0 && errno != EEXIST) { set_err("Mkdir", dst); return -1; }
+        if (mkdir(dst, 0777) != 0) {
+            struct kstat dt;
+            if (errno != EEXIST) { set_err("Mkdir", dst); return -1; }
+            /* an existing symlink would send the copy somewhere else; a file can't take children */
+            if (k_lstat(dst, &dt) != 0 || !S_ISDIR(dt.st_mode)) {
+                errno = EEXIST; set_err("Mkdir (not a folder there)", dst); return -1;
+            }
+        }
         DIR *d = opendir(src);
         if (!d) { set_err("Opendir", src); return -1; }
         struct dirent *e;
@@ -172,10 +198,26 @@ static int copy_rec(const char *src, const char *dst)
         closedir(d);
     } else {
         struct kstat dt;
-        if (skip_existing && k_lstat(dst, &dt) == 0 && dt.st_size == st.st_size)
-            g_job.bytes_done += st.st_size;           /* already synced */
-        else
+        int regular = S_ISREG(st.st_mode);
+        if (S_ISLNK(st.st_mode)) {                     /* copy what a link points to, if a file */
+            struct kstat ts;
+            regular = k_stat(src, &ts) == 0 && S_ISREG(ts.st_mode);
+            st.st_size = regular ? ts.st_size : 0;
+        }
+        if (!regular) {
+            /* FIFOs, sockets and devices (/dev/zero would fill the disk): skip */
+            errno = EINVAL;
+            set_err("Skipped special file", src);
+            rc = -1;
+        } else if (skip_existing && k_lstat(dst, &dt) == 0 && S_ISREG(dt.st_mode) && dt.st_size == st.st_size) {
+            /* already synced: nothing to transfer, so take it out of the total
+               (counting it as done would make the speed and time left wrong) */
+            uint64_t sz = (uint64_t)st.st_size;
+            g_job.bytes_total = g_job.bytes_total > sz ? g_job.bytes_total - sz : 0;
+        } else {
             rc = copy_file(src, dst);
+            if (rc) usb_gone();
+        }
     }
     g_job.files_done++;
     return rc;
@@ -293,21 +335,37 @@ static int delete_rec_dev(const char *path, uint32_t dev)
 
 /* True if path is a folder with a different filesystem than its parent: a mount point
  * such as /mnt/usb0. Deleting it would empty the whole drive. */
-int is_mount_point(const char *path)
+/* "/mnt/usb0/" -> "/mnt/usb0". Returns -1 if too long or the last part is "." or "..":
+ * then the "parent" found by cutting at the last '/' would be wrong. */
+static int norm_tail(char *out, int n, const char *path)
+{
+    if (snprintf(out, n, "%s", path) >= n) return -1;
+    size_t l = strlen(out);
+    while (l > 1 && out[l - 1] == '/') out[--l] = 0;
+    const char *b = path_base(out);
+    return (!strcmp(b, ".") || !strcmp(b, "..")) ? -1 : 0;
+}
+
+int is_mount_point(const char *path_in)
 {
     struct kstat st, pt;
+    char path[1024], parent[1024];
+    if (norm_tail(path, sizeof path, path_in)) return 1;   /* can't tell: treat as one (never deleted) */
     if (k_lstat(path, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
-    char parent[1024];
-    if (snprintf(parent, sizeof parent, "%s", path) >= (int)sizeof parent) return 0;
+    snprintf(parent, sizeof parent, "%s", path);
     char *sl = strrchr(parent, '/');
     if (!sl) return 0;
     if (sl == parent) sl[1] = 0; else *sl = 0;
     return k_stat(parent, &pt) == 0 && pt.st_dev != st.st_dev;
 }
 
-static int delete_rec(const char *path)
+static int delete_rec(const char *path_in)
 {
     struct kstat st;
+    char path[1024];
+    if (norm_tail(path, sizeof path, path_in)) {
+        errno = EINVAL; set_err("Delete (bad path)", path_in); return -1;
+    }
     if (k_lstat(path, &st) != 0) { set_err("Stat", path); return -1; }
     if (is_mount_point(path)) {
         g_job.errors++;
@@ -365,7 +423,7 @@ static void extract_all(void)
         if (dot && dot != name) *dot = 0;
         if (unique_dest(dst, sizeof dst, job_dst, name)) continue;
         if (mkdirs(dst) != 0) { set_err("Mkdir", dst); continue; }
-        zip_extract(job_src[i], dst);
+        if (zip_extract(job_src[i], dst) != 0) rmdir(dst);   /* only removed if still empty */
     }
 }
 
@@ -418,12 +476,19 @@ static void *job_thread(void *arg)
     for (int i = 0; i < job_nsrc; i++)
         measure(job_src[i], (uint64_t *)&g_job.bytes_total, (int *)&g_job.files_total);
     if (g_job.type == JOB_SIZE) goto done;
+    g_job.start_us = sceKernelGetProcessTime();   /* speed counts transfer time, not the scan */
     if (g_job.type == JOB_ZIP) {
         zip_create(job_src, job_nsrc, job_dst);
         goto done;
     }
 
-    if (g_job.type != JOB_DELETE) mkdirs(job_dst);
+    job_usb[0] = 0;
+    if (!strncmp(job_dst, "/mnt/usb", 8) && job_dst[8] >= '0' && job_dst[8] <= '9' &&
+        (job_dst[9] == '/' || job_dst[9] == 0)) {
+        snprintf(job_usb, sizeof job_usb, "%.9s", job_dst);
+        if (usb_gone()) goto done;   /* pulled before the job started: don't write under /mnt */
+    }
+    if (g_job.type != JOB_DELETE && mkdirs(job_dst) != 0) { set_err("Mkdir", job_dst); goto done; }
 
     for (int i = 0; i < job_nsrc && !g_job.cancel; i++) {
         const char *src = job_src[i];
@@ -466,11 +531,16 @@ static void *job_thread(void *arg)
                 measure(dst, &b, &f);
                 g_job.bytes_done += b;
                 g_job.files_done += f;
+            } else if (errno != EXDEV) {
+                set_err("Move", src);       /* a real error, not another drive: don't copy */
             } else if (copy_rec(src, dst) == 0 && !g_job.cancel && g_job.errors == errs) {
                 /* cross-device move: copy then delete the original */
                 int fd = g_job.files_done;
                 delete_rec(src);
                 g_job.files_done = fd;
+            } else if (!g_job.cancel) {
+                snprintf(g_job.err, sizeof g_job.err, "Move failed: original kept, partial copy in %s",
+                         path_base(dst));
             }
         }
     }

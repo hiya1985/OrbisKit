@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 Config cfg;
 
@@ -62,6 +63,18 @@ int config_save(void)
     return r;
 }
 
+/* The web thread can be saving at the same moment, so the string is changed under the lock
+ * (it would otherwise print a half-updated path into settings.ini). */
+int config_set_last(int tab, const char *path)
+{
+    pthread_mutex_lock(&save_mtx);
+    cfg.last_tab = tab;
+    snprintf(cfg.last_path, sizeof cfg.last_path, "%s", path);
+    int r = config_save_locked();
+    pthread_mutex_unlock(&save_mtx);
+    return r;
+}
+
 /* A value with a line break in it (a folder made over FTP or on a PC can have one) would start a new
  * key in settings.ini: write it as empty instead. */
 static const char *one_line(const char *v)
@@ -87,6 +100,7 @@ static int config_save_locked(void)
     for (int i = 0; i < cfg.nbookmarks; i++)
         if (*one_line(cfg.bookmarks[i])) bad |= fprintf(f, "bookmark=%s\n", cfg.bookmarks[i]) < 0;
     bad |= fflush(f) != 0;
+    bad |= fsync(fileno(f)) != 0;   /* on disk before the rename: survives a power cut */
     bad |= fclose(f) != 0;
     if (bad || rename(tmp, CONFIG_FILE) != 0) { remove(tmp); return -1; }
     return 0;

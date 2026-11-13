@@ -175,7 +175,7 @@ void viewer_draw(void)
     if (tr > ROWS) {
         int h = ROWS * LINE_H, bh = h * ROWS / tr;
         if (bh < 30) bh = 30;
-        int by = TOP + (h - bh) * v.top / (tr - ROWS);
+        int by = TOP + (int)((long long)(h - bh) * v.top / (tr - ROWS));   /* 64-bit: millions of lines */
         gfx_rect(SCREEN_W - MX + 20, TOP, 6, h, 0xFF2A333D);
         gfx_rect(SCREEN_W - MX + 20, by, 6, bh, 0xFF3A7BD5);
     }

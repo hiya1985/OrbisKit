@@ -22,6 +22,7 @@ extern Config cfg;
 
 void config_load(void);
 int  config_save(void);   /* 0 on success */
+int  config_set_last(int tab, const char *path);   /* remember tab + folder, thread-safe */
 int  bookmark_index(const char *path);   /* -1 if not bookmarked */
 int  bookmark_add(const char *path);     /* 0 ok, -1 full or path can't be stored */
 void bookmark_remove(const char *path);

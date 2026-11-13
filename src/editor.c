@@ -23,6 +23,8 @@ static struct {
     int n, cap, sel, scroll;
     int confirm_exit;
     const char *msg;
+    int pending;        /* 1 + index of a line added by TRIANGLE that the keyboard hasn't filled yet */
+    int pending_mod;    /* "modified" before that line was added */
 } ed;
 
 static void free_lines(void)
@@ -55,6 +57,12 @@ static int insert_line(int at, const char *s, size_t len)
 
 int editor_open(const char *path, char *err, int errn)
 {
+    /* saving renames the file to .bak: on a link that would replace the link, not edit its target */
+    struct kstat ls;
+    if (k_lstat(path, &ls) == 0 && S_ISLNK(ls.st_mode)) {
+        snprintf(err, errn, "This is a link - open the file it points to");
+        return -1;
+    }
     FILE *f = fopen(path, "rb");
     if (!f) { snprintf(err, errn, "Can't open file"); return -1; }
     fseek(f, 0, SEEK_END);
@@ -64,7 +72,10 @@ int editor_open(const char *path, char *err, int errn)
     if (size > MAX_FILE) { fclose(f); snprintf(err, errn, "Too big to edit (1 MB max)"); return -1; }
     char *buf = malloc(size + 1);
     if (!buf) { fclose(f); snprintf(err, errn, "Out of memory"); return -1; }
-    size = (long)fread(buf, 1, size, f);
+    /* a short read (USB error) must not open a cut-off file: saving it would lose the rest */
+    if ((long)fread(buf, 1, size, f) != size) {
+        fclose(f); free(buf); snprintf(err, errn, "Read failed"); return -1;
+    }
     fclose(f);
     if (memchr(buf, 0, size)) { free(buf); snprintf(err, errn, "Binary file - can't edit as text"); return -1; }
 
@@ -122,6 +133,7 @@ static int save(void)
         if (fputs(ed.lines[i], f) < 0) ok = 0;
         if ((i < ed.n - 1 || ed.final_nl) && fputs(eol, f) < 0) ok = 0;
     }
+    if (ok && (fflush(f) != 0 || fsync(fileno(f)) != 0)) ok = 0;   /* on disk before the rename */
     if (fclose(f) != 0) ok = 0;
     if (!ok) { unlink(tmp); ed.msg = "Save failed (disk full?)"; return -1; }
     unlink(bak);
@@ -172,6 +184,8 @@ int editor_input(const char **initial)
     if (pad_pressed(BTN_TRIANGLE)) {          /* new line below, then edit it */
         if (insert_line(ed.sel + 1, "", 0) == 0) {
             ed.sel++;
+            ed.pending = ed.sel + 1;           /* removed again if the keyboard is cancelled */
+            ed.pending_mod = ed.modified;
             ed.modified = 1;
             if (ed.sel >= ed.scroll + ROWS) ed.scroll = ed.sel - ROWS + 1;
             *initial = "";
@@ -198,8 +212,22 @@ int editor_input(const char **initial)
     return 0;
 }
 
+void editor_cancel(void)
+{
+    int i = ed.pending - 1;
+    ed.pending = 0;
+    if (!ed.active || i < 0 || i >= ed.n || ed.n <= 1) return;
+    free(ed.lines[i]);
+    memmove(ed.lines + i, ed.lines + i + 1, (ed.n - i - 1) * sizeof(char *));
+    ed.n--;
+    if (ed.sel >= ed.n) ed.sel = ed.n - 1;
+    if (ed.sel > 0 && ed.sel == i) ed.sel--;
+    ed.modified = ed.pending_mod;
+}
+
 void editor_apply(const char *text)
 {
+    ed.pending = 0;                            /* the new line (even if left empty) is kept */
     if (!ed.active || ed.sel >= ed.n) return;
     if (!strcmp(text, ed.lines[ed.sel])) return;
     char *dup = strdup(text);
