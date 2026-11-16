@@ -13,3 +13,8 @@ sce_module/
 notes/
 release/
 tests/
+
+# private / local only: recording unlock payload, old GoldHEN plugin attempt, archives
+payload/
+plugin/
+*.7z

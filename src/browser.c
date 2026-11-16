@@ -9,7 +9,7 @@
 #include <sys/stat.h>
 
 int browser_sort = SORT_NAME;
-const char *sort_names[SORT_COUNT] = { "Name", "Size (largest first)", "Date (newest first)" };
+const char *sort_names[SORT_COUNT] = { "Name", "Size (largest first)", "Date (newest first)", "Type" };
 
 static int cmp_entry(const void *a, const void *b)
 {
@@ -17,6 +17,12 @@ static int cmp_entry(const void *a, const void *b)
     if (x->is_dir != y->is_dir) return y->is_dir - x->is_dir;
     if (browser_sort == SORT_SIZE && x->size != y->size) return x->size < y->size ? 1 : -1;
     if (browser_sort == SORT_DATE && x->mtime != y->mtime) return x->mtime < y->mtime ? 1 : -1;
+    if (browser_sort == SORT_TYPE && !x->is_dir) {
+        /* by extension (.mp3 together, .pkg together...), files without one first, then by name */
+        const char *ex = strrchr(x->name, '.'), *ey = strrchr(y->name, '.');
+        int c = strcasecmp(ex && ex != x->name ? ex : "", ey && ey != y->name ? ey : "");
+        if (c) return c;
+    }
     return strcasecmp(x->name, y->name);
 }
 

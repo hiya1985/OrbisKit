@@ -168,6 +168,7 @@ static int btn_lookup(const char *s, int n, BtnIcon *bi)
         { "SQ", BI_SQUARE, 0 }, { "SQUARE", BI_SQUARE, 0 }, { "TRI", BI_TRIANGLE, 0 }, { "TRIANGLE", BI_TRIANGLE, 0 },
         { "L1", BI_PILL, "L1" }, { "R1", BI_PILL, "R1" }, { "L2", BI_PILL, "L2" }, { "R2", BI_PILL, "R2" },
         { "OPT", BI_PILL, "OPTIONS" }, { "OPTIONS", BI_PILL, "OPTIONS" },
+        { "TOUCHPAD", BI_PILL, "TOUCHPAD" }, { "L3", BI_PILL, "L3" }, { "R3", BI_PILL, "R3" },
         { "D-PAD", BI_DPAD, 0 }, { "DPAD", BI_DPAD, 0 },
         { "LEFT/RIGHT", BI_DPAD_LR, 0 }, { "UP/DOWN", BI_DPAD_UD, 0 },
     };

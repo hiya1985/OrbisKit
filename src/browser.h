@@ -19,7 +19,7 @@ typedef struct {
     int    error;     /* errno from last load, 0 if fine */
 } Browser;
 
-enum { SORT_NAME, SORT_SIZE, SORT_DATE, SORT_COUNT };
+enum { SORT_NAME, SORT_SIZE, SORT_DATE, SORT_TYPE, SORT_COUNT };
 extern int browser_sort;                  /* one of SORT_*; folders always come first */
 extern const char *sort_names[SORT_COUNT];
 

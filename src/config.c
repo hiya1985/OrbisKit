@@ -15,6 +15,7 @@ static void copy_str(char *dst, size_t n, const char *src)
 
 void config_load(void)
 {
+    cfg.volume = -1;             /* "not set": the player keeps its default */
     FILE *f = fopen(CONFIG_FILE, "r");
     if (!f) return;
     char line[1200];   /* must hold "last_path=" + a full 1023-char path */
@@ -26,7 +27,7 @@ void config_load(void)
         const char *v = eq + 1;
         int val = atoi(v);
         if (!strcmp(line, "web_autostart")) cfg.web_autostart = !!val;
-        else if (!strcmp(line, "sort_mode") && val >= 0 && val < 3) cfg.sort_mode = val;
+        else if (!strcmp(line, "sort_mode") && val >= 0 && val < 4) cfg.sort_mode = val;
         else if (!strcmp(line, "theme") && val >= 0 && val < 4) cfg.theme = val;
         /* "tab" (v1.10+): index into the tab list that starts with Home. The older "last_tab"
            key counted from Files, so it is ignored rather than reopening the wrong tab. */
@@ -45,6 +46,10 @@ void config_load(void)
         }
         else if (!strcmp(line, "last_path")) copy_str(cfg.last_path, sizeof cfg.last_path, v);
         else if (!strcmp(line, "autopayload")) copy_str(cfg.autopayload, sizeof cfg.autopayload, v);
+        else if (!strcmp(line, "dual")) cfg.dual = !!val;
+        else if (!strcmp(line, "path2")) copy_str(cfg.path2, sizeof cfg.path2, v);
+        else if (!strcmp(line, "volume") && val >= 0 && val <= 100) cfg.volume = val;
+        else if (!strcmp(line, "play_mode") && val >= 0 && val < 4) cfg.play_mode = val;
         else if (!strcmp(line, "bookmark") && *v && cfg.nbookmarks < MAX_BOOKMARKS)
             copy_str(cfg.bookmarks[cfg.nbookmarks++], sizeof cfg.bookmarks[0], v);
     }
@@ -97,6 +102,8 @@ static int config_save_locked(void)
     if (cfg.tiles_set)
         bad |= fprintf(f, "tiles=%d,%d,%d,%d,%d,%d,%d,%d\n", cfg.tiles[0], cfg.tiles[1], cfg.tiles[2],
                        cfg.tiles[3], cfg.tiles[4], cfg.tiles[5], cfg.tiles[6], cfg.tiles[7]) < 0;
+    bad |= fprintf(f, "dual=%d\npath2=%s\n", cfg.dual, one_line(cfg.path2)) < 0;
+    if (cfg.volume >= 0) bad |= fprintf(f, "volume=%d\nplay_mode=%d\n", cfg.volume, cfg.play_mode) < 0;
     for (int i = 0; i < cfg.nbookmarks; i++)
         if (*one_line(cfg.bookmarks[i])) bad |= fprintf(f, "bookmark=%s\n", cfg.bookmarks[i]) < 0;
     bad |= fflush(f) != 0;

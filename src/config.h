@@ -16,6 +16,10 @@ typedef struct {
     char autopayload[1024];      /* payload sent on launch, empty = none */
     char bookmarks[MAX_BOOKMARKS][1024];   /* full path length: a cut path is a different folder */
     int  nbookmarks;
+    int  dual;                   /* Files tab: two-panel view */
+    char path2[1024];            /* folder of the right panel */
+    int  volume;                 /* music player volume 0..100 (-1 = never set) */
+    int  play_mode;              /* music player AMODE_* */
 } Config;
 
 extern Config cfg;

@@ -720,7 +720,9 @@ static int search_emit(int s, const char *dir, const char *full, const char *nam
 /* *found = -1 once the browser is gone: the walk stops instead of scanning the whole drive */
 static void search_walk(int s, const char *dir, const char *q, int *found, int *checked, int depth)
 {
-    if (*found < 0 || *found >= WEB_SEARCH_MAX || depth > 32 || !strcmp(dir, "/dev") || !strcmp(dir, "/proc")) return;
+    /* /mnt/sandbox only mirrors folders that are found elsewhere (every result would show twice) */
+    if (*found < 0 || *found >= WEB_SEARCH_MAX || depth > 32 || !strcmp(dir, "/dev") || !strcmp(dir, "/proc") ||
+        !strcmp(dir, "/mnt/sandbox")) return;
     DIR *d = opendir(dir);
     if (!d) return;
     struct dirent *e;
@@ -751,10 +753,25 @@ static void send_search(int s, const char *dir, const char *q)
     html_escape(q, qesc, sizeof qesc);
     html_escape(dir, desc, sizeof desc);
     url_encode(dir, denc, sizeof denc);
-    sendf(s, "</header><main><form action=/search><input type=hidden name=p value=\"%s\">"
-             "<input name=q value=\"%s\" autofocus style='font:inherit;padding:7px;width:min(400px,60vw);"
-             "background:#1a2129;color:#e8ecef;border:1px solid #2a333d'> <button>Search</button> "
-             "<a href='/?p=%s'>Back to %s</a></form>", desc, qesc, denc, desc);
+    /* where to search: this folder, or one of the usual starting points ("/" = the whole console) */
+    static const struct { const char *path, *label; } where[] = {
+        { "/", "Whole console" }, { "/user", "Internal storage (/user)" }, { "/data", "/data" },
+        { "/mnt/usb0", "USB drive 0" }, { "/mnt/usb1", "USB drive 1" },
+    };
+    sendf(s, "</header><main><form action=/search>"
+             "<input name=q value=\"%s\" autofocus placeholder='File or folder name' style='font:inherit;padding:7px;"
+             "width:min(400px,60vw);background:#1a2129;color:#e8ecef;border:1px solid #2a333d'> in "
+             "<select name=p style='font:inherit;padding:6px;background:#1a2129;color:#e8ecef;border:1px solid #2a333d'>",
+          qesc);
+    int preset = 0;
+    for (unsigned i = 0; i < sizeof where / sizeof where[0]; i++) preset |= !strcmp(dir, where[i].path);
+    if (!preset) sendf(s, "<option value=\"%s\" selected>%s</option>", desc, desc);
+    for (unsigned i = 0; i < sizeof where / sizeof where[0]; i++)
+        sendf(s, "<option value=\"%s\"%s>%s</option>", where[i].path, !strcmp(dir, where[i].path) ? " selected" : "",
+              where[i].label);
+    sendf(s, "</select> <button>Search</button> <a href='/?p=%s'>Back to %s</a></form>", denc, desc);
+    if (!strcmp(dir, "/") && q[0])
+        sendf(s, "<p style='color:#8995a1'>Searching the whole console can take a minute. Results appear as they are found.</p>");
     if (!q[0]) { sendf(s, "</main></body></html>"); return; }
     sendf(s, "<h3>Results for \"%s\" in %s</h3><table>", qesc, desc);
     int found = 0, checked = 0;
@@ -1052,17 +1069,110 @@ static int gallery_dir(int s, const char *dir, int depth)
     return shown;
 }
 
+/* ---------- USB picture gallery ---------- */
+#define USB_GALLERY_MAX 2000
+
+static int is_picture(const char *name)
+{
+    const char *dot = strrchr(name, '.');
+    return dot && (!strcasecmp(dot, ".jpg") || !strcasecmp(dot, ".jpeg") || !strcasecmp(dot, ".png") ||
+                   !strcasecmp(dot, ".gif") || !strcasecmp(dot, ".bmp") || !strcasecmp(dot, ".webp"));
+}
+
+/* Pictures in dir under one heading, then its sub-folders. -1 once the browser is gone. */
+static int usb_gallery_dir(int s, const char *dir, int depth, int *shown)
+{
+    if (depth > 8 || *shown >= USB_GALLERY_MAX) return 0;
+    DIR *d = opendir(dir);
+    if (!d) return 0;
+    int header = 0, gone = 0;
+    struct dirent *e;
+    char full[1024], enc[3072], esc[1100];
+    char **subs = NULL;
+    int nsub = 0, capsub = 0;
+    while ((e = readdir(d)) && *shown < USB_GALLERY_MAX) {
+        if (e->d_name[0] == '.' || !strcmp(e->d_name, "System Volume Information")) continue;
+        if (path_join(full, sizeof full, dir, e->d_name)) continue;
+        struct kstat st;
+        if (k_stat(full, &st) != 0) continue;
+        if (S_ISDIR(st.st_mode)) {
+            /* sub-folders after this folder's pictures, so each heading has its own grid */
+            if (nsub == capsub) {
+                int nc = capsub ? capsub * 2 : 16;
+                char **ns = realloc(subs, nc * sizeof *ns);
+                if (!ns) continue;
+                subs = ns;
+                capsub = nc;
+            }
+            if ((subs[nsub] = strdup(full))) nsub++;
+            continue;
+        }
+        if (!S_ISREG(st.st_mode) || !is_picture(e->d_name)) continue;
+        if (!header) {
+            html_escape(dir, esc, sizeof esc);
+            url_encode(dir, enc, sizeof enc);
+            if (sendf(s, "<h3><a href='/?p=%s'>%s</a></h3><div class=g>", enc, esc)) { gone = 1; break; }
+            header = 1;
+        }
+        url_encode(full, enc, sizeof enc);
+        html_escape(e->d_name, esc, sizeof esc);
+        if (sendf(s, "<figure><a href='/view?p=%s' target=_blank><img loading=lazy src='/view?p=%s' alt=''></a>"
+                     "<figcaption>%s <a href='/dl?p=%s'>&#11015;</a></figcaption></figure>", enc, enc, esc, enc)) {
+            gone = 1;
+            break;
+        }
+        (*shown)++;
+    }
+    closedir(d);
+    if (header && !gone) gone = sendf(s, "</div>") != 0;
+    for (int i = 0; i < nsub; i++) {
+        if (!gone && usb_gallery_dir(s, subs[i], depth + 1, shown) < 0) gone = 1;
+        free(subs[i]);
+    }
+    free(subs);
+    return gone ? -1 : 0;
+}
+
+static const char GALLERY_CSS[] =
+    "<style>.g{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}"
+    "figure{margin:0;background:#1a2129;border-radius:6px;overflow:hidden}"
+    "figure img,figure video{width:100%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}"
+    "figcaption{padding:6px 8px;font-size:13px;color:#8995a1;word-break:break-all}"
+    ".gtabs a,.gtabs b{margin-right:18px}</style>";
+
+static void send_usb_gallery(int s)
+{
+    sendf(s, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
+             "Connection: close\r\n\r\n");
+    send_all(s, PAGE_HEAD, strlen(PAGE_HEAD));
+    send_nav(s, "gallery");
+    send_all(s, "</header><main>", 15);
+    send_all(s, GALLERY_CSS, strlen(GALLERY_CSS));
+    sendf(s, "<p class=gtabs><a href='/gallery'>Captures</a><b>USB pictures</b></p>");
+    static const char *usb[] = { "/mnt/usb0", "/mnt/usb1" };
+    int shown = 0, drives = 0;
+    for (int i = 0; i < 2; i++) {
+        if (!is_mount_point(usb[i])) continue;
+        drives++;
+        sendf(s, "<h2>USB drive %d</h2>", i);
+        int before = shown;
+        if (usb_gallery_dir(s, usb[i], 0, &shown) < 0) return;   /* the browser left */
+        if (shown == before) sendf(s, "<p style='color:#8995a1'>No pictures on this drive.</p>");
+    }
+    if (!drives) sendf(s, "<p style='color:#8995a1'>No USB drive plugged in.</p>");
+    if (shown >= USB_GALLERY_MAX) sendf(s, "<p style='color:#8995a1'>Showing the first %d pictures.</p>", USB_GALLERY_MAX);
+    sendf(s, "</main></body></html>");
+}
+
 static void send_gallery(int s)
 {
     sendf(s, "HTTP/1.0 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nCache-Control: no-store\r\n"
              "Connection: close\r\n\r\n");
     send_all(s, PAGE_HEAD, strlen(PAGE_HEAD));
     send_nav(s, "gallery");
-    sendf(s, "</header><main><style>.g{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:12px}"
-             "figure{margin:0;background:#1a2129;border-radius:6px;overflow:hidden}"
-             "figure img,figure video{width:100%%;aspect-ratio:16/9;object-fit:cover;display:block;background:#000}"
-             "figcaption{padding:6px 8px;font-size:13px;color:#8995a1;word-break:break-all}</style>"
-             "<h2>Screenshots</h2>");
+    send_all(s, "</header><main>", 15);
+    send_all(s, GALLERY_CSS, strlen(GALLERY_CSS));
+    sendf(s, "<p class=gtabs><b>Captures</b><a href='/gallery?src=usb'>USB pictures</a></p><h2>Screenshots</h2>");
     if (!gallery_dir(s, "/user/av_contents/photo", 0))
         sendf(s, "<p style='color:#8995a1'>No screenshots yet - press SHARE on the controller in a game.</p>");
     sendf(s, "<h2>Videos</h2>");
@@ -1181,7 +1291,7 @@ static void send_dashboard(int s)
         "<a class=tile href='/apps'><b>&#127918; Apps</b><span>Installed games with icons</span></a>"
         "<a class=tile href='/gallery'><b>&#128247; Gallery</b><span>Screenshots and videos</span></a>"
         "<a class=tile href='/payload'><b>&#128640; Send payload</b><span>To GoldHEN BinLoader</span></a>"
-        "<a class=tile href='/search?p=/user'><b>&#128269; Search</b><span>Find files on internal storage</span></a>"
+        "<a class=tile href='/search?p=/'><b>&#128269; Search</b><span>Find files anywhere on the console</span></a>"
         "<a class=tile href='/log'><b>&#128221; Debug log</b><span>What the app has been doing</span></a>"
         "</div><p class=dim id=upd style='font-size:13px;margin-top:16px'></p></main>"
         "<script>"
@@ -1601,7 +1711,10 @@ static void *conn_serve(void *arg)
     } else if (!strcmp(method, "GET") && !strcmp(target, "/apps")) {
         send_apps(s);
     } else if (!strcmp(method, "GET") && !strcmp(target, "/gallery")) {
-        send_gallery(s);
+        char src[8];
+        get_param(query, "src", src, sizeof src);
+        if (!strcmp(src, "usb")) send_usb_gallery(s);
+        else send_gallery(s);
     } else if (!strcmp(method, "GET") && !strcmp(target, "/edit")) {
         send_editor(s, p);
     } else if (!strcmp(method, "POST") && !strcmp(target, "/save")) {

@@ -13,6 +13,7 @@
 #include <unistd.h>
 
 #include "apps.h"
+#include "audio.h"
 #include "browser.h"
 #include "compat.h"
 #include "config.h"
@@ -24,10 +25,12 @@
 #include "gfx.h"
 #include "imgview.h"
 #include "jb.h"
+#include "leftovers.h"
 #include "notify.h"
 #include "pad.h"
 #include "payload.h"
 #include "sysinfo.h"
+#include "video.h"
 #include "web.h"
 
 #ifndef APP_VERSION          /* set by build.ps1 from $VERSION */
@@ -73,6 +76,7 @@ enum {
     ACT_UNMARK, ACT_PROPS, ACT_SENDPAYLOAD, ACT_CLEARCLIP, ACT_RENAME, ACT_VIEW,
     ACT_VIEWIMG, ACT_EXTRACT, ACT_SEARCH, ACT_SIZE, ACT_SORT, ACT_BOOKMARK, ACT_UNBOOKMARK,
     ACT_ZIP, ACT_EDIT, ACT_HASH, ACT_BIGFILES,
+    ACT_PLAYVIDEO, ACT_PLAY, ACT_PLAYALL, ACT_NOWPLAYING, ACT_COPY2, ACT_MOVE2, ACT_DUAL, ACT_SAMEDIR, ACT_LO_DELETE,
     ACT_APPPATH, ACT_APPPATH_LAST = ACT_APPPATH + 4,   /* open app_paths[n] in Files */
     ACT_TILE_RESET,
     ACT_TILE_SET, ACT_TILE_SET_LAST = ACT_TILE_SET + 63, /* put quick action n on the selected tile */
@@ -85,18 +89,18 @@ enum { OSK_RENAME = 1, OSK_MKDIR, OSK_SEARCH, OSK_ZIP, OSK_EDITLINE };
 enum {
     /* Tools page (actions) */
     TOOL_SYNC_CAPTURES, TOOL_BACKUP_DB, TOOL_BACKUP_USER, TOOL_BIGSCAN, TOOL_ESCAPE,
-    TOOL_OPEN_USB,
+    TOOL_OPEN_USB, TOOL_LEFTOVERS, TOOL_MUSIC,
     /* Settings page (saved options) */
-    TOOL_START_HOME, TOOL_WEB_AUTO, TOOL_THEME,
+    TOOL_START_HOME, TOOL_WEB_AUTO, TOOL_THEME, TOOL_DUAL,
     TOOL_COUNT
 };
 
 /* Each list page is just an ordered set of item ids: add an id here to add a row. */
 static const int tools_items[] = {
-    TOOL_SYNC_CAPTURES, TOOL_BACKUP_DB, TOOL_BACKUP_USER, TOOL_BIGSCAN, TOOL_OPEN_USB, TOOL_ESCAPE,
+    TOOL_LEFTOVERS, TOOL_MUSIC, TOOL_SYNC_CAPTURES, TOOL_BACKUP_DB, TOOL_BACKUP_USER, TOOL_BIGSCAN, TOOL_OPEN_USB, TOOL_ESCAPE,
 };
 static const int settings_items[] = {
-    TOOL_START_HOME, TOOL_WEB_AUTO, TOOL_THEME,
+    TOOL_START_HOME, TOOL_WEB_AUTO, TOOL_THEME, TOOL_DUAL,
 };
 #define NITEMS(a) (int)(sizeof a / sizeof a[0])
 #define LIST_VIS 10            /* rows visible on a list page before it scrolls */
@@ -111,6 +115,7 @@ enum {
     QA_SYSTEM, QA_BACKUP_USER, QA_FILES, QA_APPS, QA_TOOLS, QA_SETTINGS, QA_INTERNAL,
     QA_DATA, QA_AUTOPAYLOAD, QA_ESCAPE, QA_THEME,
     QA_RETIRED_19,   /* was "Load GoldHEN" (removed): keeps old settings.ini tiles from turning into a new action */
+    QA_MUSIC, QA_LEFTOVERS, QA_DUAL,   /* 1.03 */
     QA_COUNT
 };
 #define HT_COUNT 8             /* tiles on the dashboard (2 rows of 4) */
@@ -124,7 +129,16 @@ static int home_sel;
 /* ---------- state ---------- */
 static int tab;
 static int frame;
-static Browser br;
+/* Files tab: two panels (the second one only shows in two-panel view). Everything that works
+ * on "the" folder uses br = the active panel; br2 is the other one. */
+static Browser panes[2];
+static int cur_pane;
+#define br  (panes[cur_pane])
+#define br2 (panes[!cur_pane])
+static int dual;              /* two-panel view on */
+static int player_view;       /* "Now playing" screen open */
+static int lo_view;           /* leftover-package list open (Tools) */
+static int lo_sel, lo_scroll;
 static char **clip;
 static int nclip, clip_cut;
 static char payloads[PAYLOAD_MAX][512];
@@ -319,6 +333,63 @@ static void open_path(const char *p)
         tab = TAB_FILES;
 }
 
+/* ---------- music ---------- */
+/* Plays the audio files of the active folder (in the order shown), starting with the
+ * highlighted one when it is an audio file. */
+static void play_folder(int from_selected)
+{
+    int n = 0, start = 0;
+    for (int i = 0; i < br.count; i++)
+        if (!br.e[i].is_dir && audio_is_audio_name(br.e[i].name)) n++;
+    if (!n) { toast(C_RED, "No music files here (MP3, FLAC, WAV, OGG)"); return; }
+    char **l = calloc(n, sizeof *l);
+    if (!l) { toast(C_RED, "Out of memory"); return; }
+    int k = 0;
+    char p[1024];
+    for (int i = 0; i < br.count && k < n; i++) {
+        if (br.e[i].is_dir || !audio_is_audio_name(br.e[i].name)) continue;
+        if (path_join(p, sizeof p, br.path, br.e[i].name)) continue;
+        if (from_selected && i == br.sel) start = k;
+        if ((l[k] = strdup(p))) k++;
+    }
+    char err[160];
+    if (!k) toast(C_RED, "Out of memory");
+    else if (audio_play(l, k, start, err, sizeof err) != 0) toast(C_RED, "%s", err);
+    else player_view = 1;
+    free_list(l, k);
+}
+
+static void save_player_prefs(void)
+{
+    AudioStatus st;
+    audio_status(&st);
+    if (cfg.volume == st.volume && cfg.play_mode == st.mode) return;
+    cfg.volume = st.volume;
+    cfg.play_mode = st.mode;
+    config_save();
+}
+
+/* ---------- two-panel view ---------- */
+static void set_dual(int on)
+{
+    dual = cfg.dual = on;
+    if (on && !panes[1].path[0]) {
+        /* right panel: last folder it showed, else a USB drive, else /data */
+        const char *u = usb_root();
+        if (!(cfg.path2[0] && browser_load(&panes[1], cfg.path2) == 0))
+            if (browser_load(&panes[1], u ? u : "/data") != 0) browser_load(&panes[1], "/");
+    }
+    if (!on && cur_pane == 1) {
+        /* one-panel view always shows panel 0: carry the folder the user was in */
+        char keep[1024];
+        snprintf(keep, sizeof keep, "%s", panes[1].path);
+        int sel = panes[1].sel;
+        cur_pane = 0;
+        if (browser_load(&panes[0], keep) == 0) { panes[0].sel = sel < panes[0].count ? sel : 0; }
+    }
+    config_save();
+}
+
 /* ---------- actions ---------- */
 static void do_action(int act)
 {
@@ -333,6 +404,43 @@ static void do_action(int act)
         toast(C_TEXT, "%d item(s) ready to %s. Go to the target folder and choose Paste.",
               nclip, clip_cut ? "move" : "copy");
         break;
+    case ACT_PLAYVIDEO: {
+        if (!br.count) break;
+        char p[1024], err[160];
+        if (path_join(p, sizeof p, br.path, br.e[br.sel].name)) { toast(C_RED, "Path too long"); break; }
+        player_view = 0;
+        if (video_open(p, err, sizeof err) != 0) toast(C_RED, "%s", err);
+        break;
+    }
+    case ACT_PLAY:
+        play_folder(1);
+        break;
+    case ACT_PLAYALL:
+        play_folder(0);
+        break;
+    case ACT_NOWPLAYING:
+        player_view = 1;
+        break;
+    case ACT_DUAL:
+        set_dual(!dual);
+        toast(C_TEXT, dual ? "Two-panel view: [LEFT/RIGHT] switch panel, [TRIANGLE] Copy/Move to the other panel"
+                           : "One-panel view");
+        break;
+    case ACT_SAMEDIR:
+        if (!dual) break;
+        if (browser_load(&br2, br.path) != 0) toast(C_RED, "Can't open %s", br.path);
+        break;
+    case ACT_COPY2:
+    case ACT_MOVE2: {
+        if (!dual) break;
+        if (!strcmp(br.path, br2.path)) { toast(C_RED, "Both panels show the same folder"); break; }
+        char **l;
+        int cnt = collect(&l);
+        if (cnt && tv_job(act == ACT_MOVE2 ? JOB_MOVE : JOB_COPY, l, cnt, br2.path) == 0)
+            for (int i = 0; i < br.count; i++) br.e[i].marked = 0;
+        free_list(l, cnt);
+        break;
+    }
     case ACT_PASTE:
         if (!nclip) { toast(C_RED, "Clipboard is empty"); break; }
         if (tv_job(clip_cut ? JOB_MOVE : JOB_COPY, clip, nclip, br.path) == 0 && clip_cut)
@@ -400,6 +508,7 @@ static void do_action(int act)
             if (br.e[i].marked && (names[k] = strdup(br.e[i].name))) k++;
         browser_sort = cfg.sort_mode = (browser_sort + 1) % SORT_COUNT;
         browser_reload(&br);
+        if (dual) browser_reload(&br2);   /* both panels use the same order */
         for (int j = 0; j < k; j++)
             for (int i = 0; i < br.count; i++)
                 if (!strcmp(br.e[i].name, names[j])) { br.e[i].marked = 1; break; }
@@ -498,6 +607,17 @@ static void do_action(int act)
 
 static void confirmed(int act)
 {
+    if (act == ACT_LO_DELETE) {
+        uint64_t freed;
+        char err[200], a[32];
+        int d = lo_delete_marked(&freed, err, sizeof err);
+        fmt_size(a, sizeof a, freed);
+        if (err[0]) toast(C_RED, "Deleted %d file(s), %s freed. Last problem: %s", d, a, err);
+        else toast(C_GREEN, "Deleted %d file(s), %s freed", d, a);
+        if (lo_sel >= lo_count) lo_sel = lo_count ? lo_count - 1 : 0;
+        browser_reload(&br);
+        return;
+    }
     if (act == ACT_DELETE) {
         char **l;
         int n = collect(&l);
@@ -584,6 +704,15 @@ static void open_file_menu(void)
 {
     menu_open("Actions");
     int marked = browser_marked_count(&br);
+    if (br.count && !br.e[br.sel].is_dir && !marked && video_is_video_name(br.e[br.sel].name))
+        menu_add("Play video", ACT_PLAYVIDEO);
+    if (br.count && !br.e[br.sel].is_dir && !marked && audio_is_audio_name(br.e[br.sel].name))
+        menu_add("Play (and the rest of this folder)", ACT_PLAY);
+    if (audio_active()) menu_add("Now playing...", ACT_NOWPLAYING);
+    if (dual && br.count) {
+        menu_add(marked ? "Copy marked to the other panel" : "Copy to the other panel", ACT_COPY2);
+        menu_add(marked ? "Move marked to the other panel" : "Move to the other panel", ACT_MOVE2);
+    }
     if (br.count && !br.e[br.sel].is_dir && !marked) {
         const char *nm = br.e[br.sel].name;
         if (is_image_name(nm)) menu_add("View picture", ACT_VIEWIMG);
@@ -627,6 +756,10 @@ static void open_goto_menu(void)
 {
     char lbl[64];
     menu_open("Folder");
+    menu_add(dual ? "Two-panel view: ON (turn off)" : "Two-panel view: OFF (turn on)", ACT_DUAL);
+    if (dual) menu_add("Show this folder in the other panel too", ACT_SAMEDIR);
+    for (int i = 0; i < br.count; i++)
+        if (!br.e[i].is_dir && audio_is_audio_name(br.e[i].name)) { menu_add("Play all music in this folder", ACT_PLAYALL); break; }
     menu_add("Search here...", ACT_SEARCH);
     menu_add("Find largest files here", ACT_BIGFILES);
     snprintf(lbl, sizeof lbl, "Sort by: %s", sort_names[browser_sort]);
@@ -700,8 +833,60 @@ static void open_result(const char *full)
 }
 
 /* ---------- input ---------- */
+/* Result list order (L3). Largest files: size down, size up, name. Name search: name, folder. */
+static int sr_sort;
+static const char *sr_sort_name(void)
+{
+    static const char *big[] = { "Size (largest first)", "Size (smallest first)", "Type", "Name" };
+    static const char *name[] = { "Name", "Type", "Folder" };
+    return sr_big ? big[sr_sort % 4] : name[sr_sort % 3];
+}
+
+typedef struct { char *p; uint64_t sz; } SrRow;
+
+static int sr_cmp(const void *x, const void *y)
+{
+    const SrRow *a = x, *b = y;
+    const char *pa = a->p ? a->p : "", *pb = b->p ? b->p : "";
+    const char *mode = sr_sort_name();
+    if (!strncmp(mode, "Size", 4) && a->sz != b->sz) {
+        int bigger_first = a->sz < b->sz ? 1 : -1;
+        return mode[6] == 'l' ? bigger_first : -bigger_first;   /* "(largest first)" */
+    }
+    if (!strcmp(mode, "Type")) {                 /* extension, then size (largest) / name */
+        const char *ea = strrchr(path_base(pa), '.'), *eb = strrchr(path_base(pb), '.');
+        int c = strcasecmp(ea ? ea : "", eb ? eb : "");
+        if (c) return c;
+        if (sr_big && a->sz != b->sz) return a->sz < b->sz ? 1 : -1;
+    }
+    if (!strcmp(mode, "Folder")) {               /* folder (full path), then name */
+        int c = strcasecmp(pa, pb);
+        if (c) return c;
+    }
+    int c = strcasecmp(path_base(pa), path_base(pb));
+    return c ? c : strcasecmp(pa, pb);
+}
+
+/* Re-orders the results in place (only on a key press, at most SEARCH_MAX rows). */
+static void sr_apply_sort(void)
+{
+    if (g_job.running || search_count < 2) return;   /* a job may be filling the results */
+    SrRow *r = malloc(search_count * sizeof *r);
+    if (!r) return;
+    for (int i = 0; i < search_count; i++) { r[i].p = search_results[i]; r[i].sz = search_sizes[i]; }
+    qsort(r, search_count, sizeof *r, sr_cmp);
+    for (int i = 0; i < search_count; i++) { search_results[i] = r[i].p; search_sizes[i] = r[i].sz; }
+    free(r);
+    sr_sel = sr_scroll = 0;
+}
+
 static void input_results(void)
 {
+    if (pad_pressed(BTN_L3) && search_count > 1) {
+        sr_sort++;
+        sr_apply_sort();
+        toast(C_TEXT, "Sorted by %s", sr_sort_name());
+    }
     if (search_count) list_nav(&sr_sel, search_count);
     fix_scroll(&sr_sel, &sr_scroll, search_count, LIST_ROWS);
     if (pad_pressed(BTN_CROSS) && search_count) {
@@ -714,7 +899,11 @@ static void input_results(void)
 static void input_files(void)
 {
     if (sr_active) { input_results(); return; }
-    if (br.count) list_nav(&br.sel, br.count);
+    if (dual && (pad_pressed(BTN_LEFT) || pad_pressed(BTN_RIGHT))) {
+        /* two-panel view: LEFT/RIGHT pick the panel (no page jumps; L2/R2 still refresh) */
+        int want = pad_pressed(BTN_LEFT) ? 0 : 1;
+        if (want != cur_pane) cur_pane = want;
+    } else if (br.count) list_nav(&br.sel, br.count);
     if (pad_pressed(BTN_CROSS) && br.count) {
         Entry *e = &br.e[br.sel];
         if (e->is_dir) {
@@ -723,6 +912,10 @@ static void input_files(void)
             else if (browser_load(&br, p) != 0) toast(C_RED, "Can't open folder: %s", strerror(br.error));
         } else if (is_image_name(e->name)) {
             do_action(ACT_VIEWIMG);
+        } else if (video_is_video_name(e->name)) {
+            do_action(ACT_PLAYVIDEO);
+        } else if (audio_is_audio_name(e->name)) {
+            do_action(ACT_PLAY);
         } else {
             open_file_menu();
         }
@@ -734,7 +927,13 @@ static void input_files(void)
     }
     if (pad_pressed(BTN_TRIANGLE)) open_file_menu();
     if (pad_pressed(BTN_OPTIONS)) open_goto_menu();
-    if (pad_pressed(BTN_R2) || pad_pressed(BTN_L2)) { browser_reload(&br); toast(C_TEXT, "Refreshed"); }
+    if (pad_pressed(BTN_R2) || pad_pressed(BTN_L2)) {
+        browser_reload(&br);
+        if (dual) browser_reload(&br2);
+        toast(C_TEXT, "Refreshed");
+    }
+    if (pad_pressed(BTN_R3)) do_action(ACT_DUAL);
+    if (pad_pressed(BTN_L3)) do_action(ACT_SORT);   /* Name -> Size -> Date */
     fix_scroll(&br.sel, &br.scroll, br.count, LIST_ROWS);
 }
 
@@ -858,6 +1057,9 @@ static const char *item_name(int id)
     case TOOL_BIGSCAN:       return "Find the largest files on internal storage";
     case TOOL_ESCAPE:        return "Retry sandbox escape (GoldHEN)";
     case TOOL_OPEN_USB:      return "Open USB drive in file manager";
+    case TOOL_LEFTOVERS:     return "Find leftovers (installed .pkg files)";
+    case TOOL_MUSIC:         return "Music player";
+    case TOOL_DUAL:          return "Files: two-panel view";
     case TOOL_START_HOME:    return "When OrbisKit opens, show";
     case TOOL_WEB_AUTO:      return "Start web file manager on launch";
     case TOOL_THEME:         return "Theme";
@@ -874,6 +1076,9 @@ static const char *item_desc(int id)
     case TOOL_BIGSCAN:       return "Scans /user and lists the 200 biggest files, to see what fills the drive.";
     case TOOL_ESCAPE:        return "Asks GoldHEN to lift the app sandbox for full filesystem access.";
     case TOOL_OPEN_USB:      return "Jumps to /mnt/usb0 (or usb1) in the Files tab.";
+    case TOOL_LEFTOVERS:     return "Finds .pkg files in /data and on USB whose game, update or DLC is already installed.";
+    case TOOL_MUSIC:         return "Now playing. Start music by opening an MP3, FLAC, WAV or OGG file in Files.";
+    case TOOL_DUAL:          return "Two folders side by side: copy/move straight to the other panel. [R3] in Files too.";
     case TOOL_START_HOME:    return "The Home dashboard, or the tab and folder you used last.";
     case TOOL_WEB_AUTO:      return "Starts the browser file manager (port 8080) every time OrbisKit starts.";
     case TOOL_THEME:         return "Colour scheme of the app.";
@@ -889,6 +1094,15 @@ static const char *item_value(int id, char *buf, int n, uint32_t *col)
     case TOOL_THEME:      snprintf(buf, n, "< %s >", themes[cfg.theme].name); *col = C_TEXT; return buf;
     case TOOL_START_HOME: snprintf(buf, n, "< %s >", cfg.start_last ? "Last place" : "Home"); *col = C_TEXT; return buf;
     case TOOL_WEB_AUTO:   if (cfg.web_autostart) *col = C_GREEN; return cfg.web_autostart ? "ON" : "OFF";
+    case TOOL_DUAL:       if (dual) *col = C_GREEN; return dual ? "ON" : "OFF";
+    case TOOL_MUSIC: {
+        AudioStatus st;
+        audio_status(&st);
+        if (!st.active) return "stopped";
+        *col = st.paused ? C_MARK : C_GREEN;
+        snprintf(buf, n, "%s", st.paused ? "paused" : "playing");
+        return buf;
+    }
     }
     return NULL;
 }
@@ -904,6 +1118,9 @@ static int item_adjust(int id, int d)
     case TOOL_START_HOME:
         cfg.start_last ^= 1;
         config_save();
+        return 1;
+    case TOOL_DUAL:
+        set_dual(!dual);
         return 1;
     }
     return 0;
@@ -944,6 +1161,17 @@ static void run_item(int id)
         if (u) { sr_active = 0; open_path(u); } else toast(C_RED, "No USB drive found");
         break;
     }
+    case TOOL_LEFTOVERS:
+        tab = TAB_TOOLS;
+        lo_view = 1;
+        if (!lo_running()) { lo_sel = lo_scroll = 0; lo_start(); }
+        break;
+    case TOOL_MUSIC:
+        player_view = 1;
+        break;
+    case TOOL_DUAL:
+        set_dual(!dual);
+        break;
     }
 }
 
@@ -980,6 +1208,9 @@ static const char *qa_title(int a)
     case QA_AUTOPAYLOAD: return "Send auto payload";
     case QA_ESCAPE:      return "Sandbox escape";
     case QA_THEME:       return "Next theme";
+    case QA_MUSIC:       return "Music player";
+    case QA_LEFTOVERS:   return "Find leftovers";
+    case QA_DUAL:        return "Two-panel files";
     }
     return "Empty";
 }
@@ -1009,6 +1240,13 @@ static void qa_run(int a)
     case QA_INTERNAL:    sr_active = 0; open_path("/user"); break;
     case QA_DATA:        sr_active = 0; open_path("/data"); break;
     case QA_ESCAPE:      run_item(TOOL_ESCAPE); break;
+    case QA_MUSIC:       player_view = 1; break;
+    case QA_LEFTOVERS:   run_item(TOOL_LEFTOVERS); break;
+    case QA_DUAL:
+        if (!dual) set_dual(1);
+        sr_active = 0;
+        tab = TAB_FILES;
+        break;
     case QA_THEME:
         cfg.theme = (cfg.theme + 1) % THEME_COUNT;
         config_save();
@@ -1079,6 +1317,188 @@ static void input_home(void)
     if (pad_pressed(BTN_TRIANGLE)) open_tile_menu();
 }
 
+static void draw_box(int x, int y, int w, int h, uint32_t border);
+static void draw_footer(const char *hints);
+static void draw_scrollbar(int top, int rows, int scroll, int count);
+
+/* ---------- Now playing screen ---------- */
+static void input_player(void)
+{
+    AudioStatus st;
+    audio_status(&st);
+    if (pad_pressed(BTN_CIRCLE)) { player_view = 0; save_player_prefs(); return; }
+    if (!st.active) {
+        if (pad_pressed(BTN_CROSS)) player_view = 0;
+        return;
+    }
+    if (pad_pressed(BTN_CROSS)) audio_pause_toggle();
+    if (pad_pressed(BTN_L1)) audio_skip(-1);
+    if (pad_pressed(BTN_R1)) audio_skip(1);
+    if (pad_pressed(BTN_LEFT)) audio_seek(-10);
+    if (pad_pressed(BTN_RIGHT)) audio_seek(10);
+    if (pad_pressed(BTN_UP)) audio_volume(5);
+    if (pad_pressed(BTN_DOWN)) audio_volume(-5);
+    if (pad_pressed(BTN_SQUARE)) {
+        audio_cycle_mode();
+        audio_status(&st);
+        toast(C_TEXT, "%s", audio_mode_name(st.mode));
+    }
+    if (pad_pressed(BTN_TRIANGLE)) { audio_stop(); save_player_prefs(); toast(C_TEXT, "Music stopped"); }
+}
+
+static void fmt_time(char *out, int n, double s)
+{
+    if (s < 0) { snprintf(out, n, "--:--"); return; }
+    long t = (long)s;
+    if (t >= 3600) snprintf(out, n, "%ld:%02ld:%02ld", t / 3600, t / 60 % 60, t % 60);
+    else snprintf(out, n, "%ld:%02ld", t / 60, t % 60);
+}
+
+static void draw_player(void)
+{
+    AudioStatus st;
+    audio_status(&st);
+    int w = 1400, h = 700, x = (SCREEN_W - w) / 2, y = (SCREEN_H - h) / 2 - 20;
+    gfx_rect_blend(0, 0, SCREEN_W, SCREEN_H, 0xFF000000, 170);
+    draw_box(x, y, w, h, C_ACCENT);
+    gfx_text(x + 40, y + 30, "Now playing", C_ACCENT, 0);
+    char buf[300], a[32], b[32];
+    if (!st.active) {
+        gfx_text(x + 40, y + 120, "Nothing is playing.", C_TEXT, 0);
+        gfx_text(x + 40, y + 170, "Open a music file in Files (MP3, FLAC, WAV, OGG) to start.", C_DIM, w - 80);
+        if (st.err[0]) gfx_text(x + 40, y + 240, st.err, C_RED, w - 80);
+        gfx_hint(x + 40, y + h - 70, "[O] Close", C_DIM, 0);
+        return;
+    }
+    if (st.rate) {
+        snprintf(buf, sizeof buf, "%s  %d Hz  %s", st.format, st.rate,
+                 st.channels == 1 ? "mono" : st.channels == 2 ? "stereo" : "multi-channel");
+        gfx_text(x + w - 40 - gfx_text_width(buf), y + 30, buf, C_DIM, 0);
+    }
+    gfx_text(x + 40, y + 110, st.name[0] ? st.name : "Loading...", 0xFFFFFFFF, w - 80);
+    gfx_text(x + 40, y + 160, st.folder, C_DIM, w - 80);
+
+    /* level bars */
+    int bx = x + 40, by = y + 230, bw = w - 80, bh = 190, gap = 8;
+    int one = (bw - gap * (AUDIO_BARS - 1)) / AUDIO_BARS;
+    for (int i = 0; i < AUDIO_BARS; i++) {
+        float v = st.paused ? 0 : st.levels[i];
+        int hh = (int)(v * 1.6f * bh);
+        if (hh > bh) hh = bh;
+        if (hh < 4) hh = 4;
+        gfx_rect(bx + i * (one + gap), by + bh - hh, one, hh, i % 2 ? C_ACCENT : C_SEL);
+    }
+
+    /* progress */
+    int py = y + 460;
+    fmt_time(a, sizeof a, st.pos_s);
+    fmt_time(b, sizeof b, st.len_s);
+    gfx_rect(x + 40, py, w - 80, 14, C_LINE);
+    if (st.len_s > 0) {
+        double f = st.pos_s / st.len_s;
+        if (f > 1) f = 1;
+        gfx_rect(x + 40, py, (int)((w - 80) * f), 14, C_ACCENT);
+    }
+    gfx_text(x + 40, py + 30, a, C_TEXT, 0);
+    gfx_text(x + w - 40 - gfx_text_width(b), py + 30, b, C_TEXT, 0);
+    snprintf(buf, sizeof buf, "%s", st.paused ? "PAUSED" : "PLAYING");
+    gfx_text(x + (w - gfx_text_width(buf)) / 2, py + 30, buf, st.paused ? C_MARK : C_GREEN, 0);
+
+    snprintf(buf, sizeof buf, "Track %d / %d     %s     Volume %d%%", st.index + 1, st.count,
+             audio_mode_name(st.mode), st.volume);
+    gfx_text(x + 40, py + 90, buf, C_TEXT, w - 80);
+    if (st.err[0]) gfx_text(x + 40, py + 140, st.err, C_RED, w - 80);
+    gfx_hint(x + 40, y + h - 60,
+             "[X] Pause  [L1/R1] Prev/Next  [LEFT/RIGHT] -10s/+10s  [UP/DOWN] Volume  [SQUARE] Mode  [TRIANGLE] Stop  [O] Hide",
+             C_DIM, w - 80);
+}
+
+/* ---------- leftover packages (Tools) ---------- */
+static void input_leftovers(void)
+{
+    if (lo_running()) {
+        if (pad_pressed(BTN_CIRCLE)) lo_cancel();
+        return;
+    }
+    int n = lo_count;
+    if (n) list_nav(&lo_sel, n);
+    fix_scroll(&lo_sel, &lo_scroll, n, LIST_ROWS - 2);
+    if (pad_pressed(BTN_CIRCLE)) { lo_view = 0; return; }
+    if (pad_pressed(BTN_SQUARE) && n) {
+        lo_items[lo_sel].marked ^= 1;
+        if (lo_sel < n - 1) lo_sel++;
+    }
+    if (pad_pressed(BTN_TRIANGLE) && n) {
+        int all = 1;
+        for (int i = 0; i < n; i++) all &= lo_items[i].marked;
+        for (int i = 0; i < n; i++) lo_items[i].marked = !all;
+    }
+    if (pad_pressed(BTN_OPTIONS)) { lo_start(); lo_sel = lo_scroll = 0; }
+    if (pad_pressed(BTN_CROSS) && n) {
+        int m = 0;
+        uint64_t sz = 0;
+        for (int i = 0; i < n; i++) if (lo_items[i].marked) { m++; sz += lo_items[i].size; }
+        if (!m) { toast(C_MARK, "Nothing marked - [SQUARE] marks a file, [TRIANGLE] marks all"); return; }
+        char a[32];
+        fmt_size(a, sizeof a, sz);
+        ask(ACT_LO_DELETE, "Delete %d marked package file(s), %s? The installed games stay installed.", m, a);
+    }
+}
+
+static void draw_leftovers(void)
+{
+    char buf[400], a[32];
+    gfx_text(MX, PATH_Y - 4, "Find leftovers - .pkg files already installed (same or newer version)", C_ACCENT, 0);
+    int top = PATH_Y + 42;
+    gfx_rect(MX, top - 10, SCREEN_W - 2 * MX, 2, C_LINE);
+    if (lo_running()) {
+        int c, p;
+        char cur[512];
+        lo_progress(&c, &p, cur, sizeof cur);
+        snprintf(buf, sizeof buf, "Scanning /data and USB drives...  %d items checked, %d packages, %d leftover(s)",
+                 c, p, lo_count);
+        gfx_text(MX + 20, top + 10, buf, C_TEXT, 0);
+        gfx_text(MX + 20, top + 60, cur, C_DIM, SCREEN_W - 2 * MX - 40);
+        int pulse = (int)(((unsigned)frame * 12u) % (unsigned)(SCREEN_W - 2 * MX - 240));
+        gfx_rect(MX + 20, top + 120, SCREEN_W - 2 * MX - 40, 24, C_LINE);
+        gfx_rect(MX + 20 + pulse, top + 120, 200, 24, C_ACCENT);
+        draw_footer("[O] Stop the scan");
+        return;
+    }
+    int n = lo_count, m = 0;
+    uint64_t total = 0, msz = 0;
+    for (int i = 0; i < n; i++) {
+        total += lo_items[i].size;
+        if (lo_items[i].marked) { m++; msz += lo_items[i].size; }
+    }
+    if (!n) gfx_text(MX + 20, top + 10, "No leftover packages found. Nothing to clean up.", C_GREEN, 0);
+    int rows = LIST_ROWS - 2;
+    for (int r = 0; r < rows; r++) {
+        int i = lo_scroll + r;
+        if (i >= n) break;
+        Leftover *l = &lo_items[i];
+        int y = top + r * ROW_H;
+        if (i == lo_sel) gfx_rect(MX, y, SCREEN_W - 2 * MX, ROW_H - 4, C_SEL);
+        if (l->marked) gfx_text(MX + 10, y + 3, "*", C_MARK, 0);
+        gfx_text(MX + 40, y + 3, path_base(l->path), l->marked ? C_MARK : C_TEXT, 760);
+        snprintf(buf, sizeof buf, "%s %s  v%s (installed v%s)", lo_type_name(l->type), l->title_id,
+                 l->pkg_ver[0] ? l->pkg_ver : "?", l->inst_ver[0] ? l->inst_ver : "-");
+        gfx_text(MX + 830, y + 3, buf, C_DIM, 640);
+        fmt_size(a, sizeof a, l->size);
+        gfx_text(SCREEN_W - MX - 20 - gfx_text_width(a), y + 3, a, C_DIM, 0);
+    }
+    draw_scrollbar(top, rows, lo_scroll, n);
+    if (n) {
+        Leftover *l = &lo_items[lo_sel];
+        gfx_text(MX, top + rows * ROW_H + 6, l->path, C_DIM, SCREEN_W - 2 * MX - 600);
+        fmt_size(a, sizeof a, total);
+        int k = snprintf(buf, sizeof buf, "%d file(s), %s", n, a);
+        if (m) { fmt_size(a, sizeof a, msz); snprintf(buf + k, sizeof buf - k, "  -  %d marked, %s", m, a); }
+        gfx_text(SCREEN_W - MX - gfx_text_width(buf), top + rows * ROW_H + 6, buf, m ? C_MARK : C_DIM, 0);
+    }
+    draw_footer("[SQUARE] Mark  [TRIANGLE] Mark all  [X] Delete marked  [OPTIONS] Scan again  [O] Back");
+}
+
 static void handle_input(void)
 {
     /* a job started from the web (quiet) runs invisibly: the TV stays usable and can't cancel it */
@@ -1086,6 +1506,8 @@ static void handle_input(void)
         if (pad_pressed(BTN_CIRCLE)) g_job.cancel = 1;
         return;
     }
+    if (video_active()) { video_input(); return; }
+    if (player_view) { input_player(); return; }
     if (osk_active()) {
         if (osk_update()) {
             if (osk_accepted()) osk_finished(osk_purpose(), osk_text());
@@ -1146,6 +1568,15 @@ static void handle_input(void)
         }
         return;
     }
+    if (pad_pressed(BTN_TOUCHPAD)) {
+        player_view = 1;   /* the music screen from anywhere */
+        return;
+    }
+    if (tab == TAB_TOOLS && lo_view) {
+        /* tabs can't change while the scan list is open: the list owns L1/R1-free controls */
+        input_leftovers();
+        return;
+    }
     if (pad_pressed(BTN_L1)) tab = (tab + TAB_COUNT - 1) % TAB_COUNT;
     if (pad_pressed(BTN_R1)) tab = (tab + 1) % TAB_COUNT;
 
@@ -1195,8 +1626,8 @@ static void draw_header(void)
 
     /* server badges: shows at a glance that the console is reachable over the network */
     int bx = SCREEN_W - MX - w - 40 - cw - 30;
-    const char *badges[1] = { web_running() ? "WEB" : NULL };
-    for (int i = 0; i < 1; i++) {
+    const char *badges[2] = { web_running() ? "WEB" : NULL, audio_active() ? "MUSIC" : NULL };
+    for (int i = 0; i < 2; i++) {
         if (!badges[i]) continue;
         int bw = gfx_text_width(badges[i]) + 20;
         bx -= bw;
@@ -1241,8 +1672,8 @@ static void draw_results(void)
     if (sr_big) snprintf(buf, sizeof buf, "Largest files in %s", sr_root);
     else snprintf(buf, sizeof buf, "Search \"%s\" in %s", sr_query, sr_root);
     gfx_text(MX, PATH_Y, buf, C_ACCENT, 1300);
-    snprintf(buf, sizeof buf, "%d result%s%s", search_count, search_count == 1 ? "" : "s",
-             !sr_big && search_count >= SEARCH_MAX ? " (limit reached)" : "");
+    snprintf(buf, sizeof buf, "%d result%s%s   Sort: %s", search_count, search_count == 1 ? "" : "s",
+             !sr_big && search_count >= SEARCH_MAX ? " (limit reached)" : "", sr_sort_name());
     gfx_text(SCREEN_W - MX - gfx_text_width(buf), PATH_Y, buf, C_MARK, 0);
     gfx_rect(MX, LIST_Y - 10, SCREEN_W - 2 * MX, 2, C_LINE);
     if (!search_count) gfx_text(MX + 20, LIST_Y + 10, "Nothing found.", C_DIM, 0);
@@ -1268,14 +1699,65 @@ static void draw_results(void)
         gfx_text(MX + 40 + (w > 600 ? 600 : w) + 20, y + 3, rel, C_DIM, SCREEN_W - 2 * MX - 700 - sizew);
     }
     draw_scrollbar(LIST_Y, LIST_ROWS, sr_scroll, search_count);
-    draw_footer(sr_big ? "[X] Go to file  [O] Back to folder"
-                       : "[X] Go to file  [O] Back to folder  [TRIANGLE] New search");
+    draw_footer(sr_big ? "[X] Go to file  [O] Back to folder  [L3] Sort"
+                       : "[X] Go to file  [O] Back to folder  [TRIANGLE] New search  [L3] Sort");
+}
+
+/* One panel of the two-panel view: name and size only (no date column - not enough room). */
+static void draw_pane(Browser *b, int x, int w, int active)
+{
+    char buf[256];
+    gfx_rect(x - 3, PATH_Y - 10, w + 6, 4, active ? C_ACCENT : C_LINE);
+    gfx_text(x + 10, PATH_Y, b->path, active ? C_ACCENT : C_DIM, w - 20);
+    gfx_rect(x, LIST_Y - 10, w, 2, C_LINE);
+    if (!b->count)
+        gfx_text(x + 20, LIST_Y + 10, b->error ? strerror(b->error) : "(empty folder)", C_DIM, w - 40);
+    for (int r = 0; r < LIST_ROWS; r++) {
+        int i = b->scroll + r;
+        if (i >= b->count) break;
+        Entry *e = &b->e[i];
+        int y = LIST_Y + r * ROW_H;
+        if (i == b->sel) gfx_rect(x, y, w, ROW_H - 4, active ? C_SEL : C_LINE);
+        uint32_t col = e->marked ? C_MARK : (e->is_dir ? C_ACCENT : C_TEXT);
+        if (e->marked) gfx_text(x + 6, y + 3, "*", C_MARK, 0);
+        int sw = 0;
+        if (!e->is_dir) {
+            fmt_size(buf, sizeof buf, e->size);
+            sw = gfx_text_width(buf);
+            gfx_text(x + w - 14 - sw, y + 3, buf, C_DIM, 0);
+        }
+        snprintf(buf, sizeof buf, "%s%s", e->name, e->is_dir ? "/" : "");
+        gfx_text(x + 30, y + 3, buf, col, w - 30 - sw - 40);
+    }
+    snprintf(buf, sizeof buf, "%d item(s)", b->count);
+    int m = browser_marked_count(b);
+    if (m) snprintf(buf + strlen(buf), sizeof buf - strlen(buf), ", %d marked", m);
+    gfx_text(x + w - gfx_text_width(buf), LIST_Y + LIST_ROWS * ROW_H + 4, buf, C_DIM, 0);
+}
+
+static void draw_files_dual(void)
+{
+    int gap = 40, w = (SCREEN_W - 2 * MX - gap) / 2;
+    for (int p = 0; p < 2; p++) {
+        Browser *b = &panes[p];
+        fix_scroll(&b->sel, &b->scroll, b->count, LIST_ROWS);
+        draw_pane(b, MX + p * (w + gap), w, p == cur_pane);
+    }
+    if (nclip) {
+        char buf[64];
+        snprintf(buf, sizeof buf, "Clipboard: %d to %s", nclip, clip_cut ? "move" : "copy");
+        gfx_text(MX, LIST_Y + LIST_ROWS * ROW_H + 4, buf, C_MARK, 0);
+    } else if (free_here[0]) {
+        gfx_text(MX, LIST_Y + LIST_ROWS * ROW_H + 4, free_here, C_DIM, 0);
+    }
+    draw_footer("[LEFT/RIGHT] Panel  [X] Open  [O] Back  [SQUARE] Mark  [TRIANGLE] Copy/Move to other panel  [OPTIONS] Menu  [L3] Sort  [R3] One panel");
 }
 
 static void draw_files(void)
 {
     char buf[256];
     if (sr_active) { draw_results(); return; }
+    if (dual) { draw_files_dual(); return; }
     gfx_text(MX, PATH_Y, br.path, C_ACCENT, 1250);
     if (nclip) {
         snprintf(buf, sizeof buf, "Clipboard: %d to %s", nclip, clip_cut ? "move" : "copy");
@@ -1319,7 +1801,7 @@ static void draw_files(void)
         gfx_text(MX, LIST_Y + LIST_ROWS * ROW_H + 4, left, C_DIM, 0);
     }
 
-    draw_footer("[X] Open  [O] Back  [SQUARE] Mark  [TRIANGLE] Actions  [OPTIONS] Search/Sort/Go to  [L2/R2] Refresh");
+    draw_footer("[X] Open  [O] Back  [SQUARE] Mark  [TRIANGLE] Actions  [OPTIONS] Search/Go to  [L3] Sort  [R3] Two panels");
 }
 
 static void draw_apps(void)
@@ -1547,7 +2029,7 @@ static void draw_list(const int *items, int n, int page, const char *title)
     }
     int id = items[sel];
     draw_footer((id == TOOL_THEME || id == TOOL_START_HOME) ? "[LEFT/RIGHT] or [X] Change"
-                : id == TOOL_WEB_AUTO ? "[X] Turn on/off" : "[X] Run");
+                : (id == TOOL_WEB_AUTO || id == TOOL_DUAL) ? "[X] Turn on/off" : "[X] Run");
 }
 
 /* ---------- Home dashboard ---------- */
@@ -1680,6 +2162,15 @@ static void draw_home(void)
             sc = has_root ? C_GREEN : C_MARK;
             break;
         case QA_THEME:       snprintf(a, sizeof a, "now: %s", themes[cfg.theme].name); break;
+        case QA_MUSIC: {
+            AudioStatus st;
+            audio_status(&st);
+            if (st.active) { snprintf(a, sizeof a, "%s", st.name); sc = st.paused ? C_MARK : C_GREEN; }
+            else snprintf(a, sizeof a, "MP3 FLAC WAV OGG");
+            break;
+        }
+        case QA_LEFTOVERS:   snprintf(a, sizeof a, "installed .pkg files"); break;
+        case QA_DUAL:        snprintf(a, sizeof a, "%s", dual ? "ON" : "OFF"); if (dual) sc = C_GREEN; break;
         case QA_SYSTEM:
             /* live temperatures, coloured by the hotter of the two */
             if (cpu_t >= 0 || soc_t >= 0) {
@@ -1816,6 +2307,11 @@ job_done:
 
 static void draw(void)
 {
+    if (video_active()) {
+        video_draw();
+        if (toast_t > 0) draw_overlays();
+        return;
+    }
     if (imgview_active()) {
         char pos[32];
         image_position(pos, sizeof pos);
@@ -1832,7 +2328,10 @@ static void draw(void)
     case TAB_NET:      draw_net(); break;
     case TAB_PAYLOADS: draw_payloads(); break;
     case TAB_SYSTEM:   draw_system(); break;
-    case TAB_TOOLS:    draw_list(tools_items, NITEMS(tools_items), PAGE_TOOLS, "Tools"); break;
+    case TAB_TOOLS:
+        if (lo_view) draw_leftovers();
+        else draw_list(tools_items, NITEMS(tools_items), PAGE_TOOLS, "Tools");
+        break;
     case TAB_SETTINGS: draw_list(settings_items, NITEMS(settings_items), PAGE_SETTINGS, "Settings - saved automatically"); break;
     }
     if (editor_active()) {
@@ -1843,6 +2342,7 @@ static void draw(void)
         viewer_draw();
         draw_footer("[UP/DOWN] Scroll  [LEFT/RIGHT] Page  [L2/R2] Top/End  [SQUARE] Text/Hex  [O] Close");
     }
+    if (player_view) draw_player();
     draw_overlays();
     osk_draw();
 }
@@ -1857,6 +2357,7 @@ static void job_collect(void)
     if (g_job.type == JOB_BIGFILES) {
         sr_sel = sr_scroll = 0;
         sr_active = sr_big = 1;
+        sr_sort = 0;   /* largest first, as the scan delivers them */
         char a[32];
         fmt_size(a, sizeof a, g_job.bytes_total);
         toast(C_GREEN, "%d files (%s) checked - showing the %d largest", g_job.files_done, a, search_count);
@@ -1866,6 +2367,8 @@ static void job_collect(void)
         sr_sel = sr_scroll = 0;
         sr_active = 1;
         sr_big = 0;
+        sr_sort = 0;
+        sr_apply_sort();   /* name order */
         if (g_job.cancel) toast(C_MARK, "Search stopped: %d result(s) so far", search_count);
         else toast(search_count ? C_GREEN : C_MARK, "%d result(s) for \"%s\"", search_count, sr_query);
         return;
@@ -1897,6 +2400,7 @@ static void job_collect(void)
         return;
     }
     browser_reload(&br);
+    if (dual) browser_reload(&br2);
     npayloads = payload_scan(payloads, PAYLOAD_MAX);
     if (g_job.cancel) toast(C_MARK, "Cancelled");
     else if (g_job.errors) toast(C_RED, "%d error(s). Last: %s", g_job.errors, g_job.err);
@@ -1943,8 +2447,10 @@ static void poll_status(void)
     }
 
     /* remember tab and folder for next launch */
-    if (frame % 120 == 60 && (cfg.last_tab != tab || strcmp(cfg.last_path, br.path))) {
-        config_set_last(tab, br.path);
+    if (frame % 120 == 60 && (cfg.last_tab != tab || strcmp(cfg.last_path, panes[0].path) ||
+                              (dual && strcmp(cfg.path2, panes[1].path)))) {
+        if (dual) snprintf(cfg.path2, sizeof cfg.path2, "%s", panes[1].path);
+        config_set_last(tab, panes[0].path);
     }
 
     if (g_job.finished) {
@@ -1985,6 +2491,8 @@ int main(void)
     if (!(cfg.last_path[0] && browser_load(&br, cfg.last_path) == 0))
         if (browser_load(&br, has_root ? "/" : "/data") != 0) browser_load(&br, "/");
     tab = (cfg.start_last && cfg.last_tab >= 0 && cfg.last_tab < TAB_COUNT) ? cfg.last_tab : TAB_HOME;
+    if (cfg.dual) { dual = 0; set_dual(1); }
+    audio_set_prefs(cfg.volume, cfg.play_mode);
     apps_scan();          /* the Home dashboard shows the installed-app summary */
     ap_scanned = 1;
     dlog("start folder: %s (%d entries, error %d)", br.path, br.count, br.error);

@@ -16,7 +16,7 @@ Set-Location $PSScriptRoot
 $TITLE      = "OrbisKit"
 $TITLE_ID   = "ORBK00001"
 $CONTENT_ID = "IV0000-ORBK00001_00-ORBISKIT00000000"
-$VERSION    = "01.02"   # the ONLY place the version is set: also shown in the app (01.02 -> "v1.02")
+$VERSION    = "01.03"   # the ONLY place the version is set: also shown in the app (01.02 -> "v1.02")
 $MASTER_VER = "01.00"   # base (master) version: must stay the same in the app and all its updates
 if ($Ver) {             # one-off override, e.g. -Ver 01.01 (PowerShell names ignore case: not -Version)
     if ($Ver -notmatch '^\d\d\.\d\d$') { throw "-Ver must look like 01.01" }
@@ -54,7 +54,8 @@ $cflags = @("--target=x86_64-pc-freebsd12-elf", "-fPIC", "-funwind-tables", "-O2
             "-isysroot", $TC, "-isystem", "$TC\include", "-Isrc",
             ('-DAPP_VERSION=\"{0}\"' -f $VERSION.TrimStart('0')))   # \" survives PowerShell 5.1's argument passing
 $libs = @("-lc", "-lm", "-lkernel", "-lSceVideoOut", "-lSceUserService", "-lScePad",
-          "-lSceNet", "-lSceNetCtl", "-lSceSystemService")
+          "-lSceNet", "-lSceNetCtl", "-lSceSystemService", "-lSceAudioOut",
+          "-lSceAvPlayer", "-lSceSysmodule")
 $libdirs = @("-L$TC\lib")
 
 if ($env:GOLDHEN_SDK) {
@@ -70,9 +71,17 @@ $objs = @()
 foreach ($src in Get-ChildItem src\*.c) {
     $obj = "build\$($src.BaseName).o"
     Write-Host "CC  $($src.Name)"
-    Run clang ($cflags + @("-c", $src.FullName, "-o", $obj))
+    Run clang ($cflags + @("-Isrc\ext\helix-aac", "-c", $src.FullName, "-o", $obj))
     $objs += $obj
 }
+# Helix AAC decoder (sound of MP4 videos): third-party code, built as-is without warnings
+New-Item -ItemType Directory -Force build\helix | Out-Null
+foreach ($src in Get-ChildItem src\ext\helix-aac\*.c) {
+    $obj = "build\helix\$($src.BaseName).o"
+    Run clang ($cflags + @("-w", "-Isrc\ext\helix-aac", "-c", $src.FullName, "-o", $obj))
+    $objs += $obj
+}
+Write-Host "CC  Helix AAC decoder ($((Get-ChildItem src\ext\helix-aac\*.c).Count) files)"
 
 Write-Host "LD  eboot.elf"
 Run ld.lld (@("-m", "elf_x86_64", "-pie", "--script", "$TC\link.x", "--eh-frame-hdr",

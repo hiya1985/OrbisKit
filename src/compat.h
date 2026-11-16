@@ -74,3 +74,19 @@ uint16_t sceNetNtohs(uint16_t v);
 int sceNetCtlInit(void);
 int sceNetCtlGetInfo(int code, void *info);
 #define NETCTL_INFO_IP_ADDRESS 14
+
+/* ---- AudioOut (music player) ---- */
+#define AUDIO_OUT_USER_SYSTEM     255   /* ORBIS_USER_SERVICE_USER_ID_SYSTEM */
+#define AUDIO_OUT_PORT_MAIN       0
+#define AUDIO_OUT_S16_STEREO      1
+int sceAudioOutInit(void);
+int sceAudioOutOpen(int userId, int port, int index, uint32_t grain, uint32_t rate, uint32_t format);
+int sceAudioOutOutput(int handle, const void *buf);   /* blocks until the previous buffer played */
+int sceAudioOutClose(int handle);
+
+/* ---- Sysmodule / direct memory release (video player) ---- */
+int sceSysmoduleLoadModule(uint16_t id);
+int sceSysmoduleUnloadModule(uint16_t id);
+#define SYSMODULE_AV_PLAYER 0x00A5
+int sceKernelReleaseDirectMemory(int64_t start, size_t len);
+int sceKernelMunmap(void *addr, size_t len);

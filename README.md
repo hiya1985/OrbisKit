@@ -21,13 +21,13 @@ Web file manager, opened from a PC browser:
 
 | Tab | What it does |
 |-----|--------------|
-| **Home** | Dashboard with server status, uptime, an installed-app summary and 8 quick-action tiles (2 rows of 4). X runs a tile. Triangle picks a tile's action from a list (servers, Files/Apps/Tools/Settings, USB, internal storage, `/data`, payloads, backups, capture sync, largest files, sandbox escape, next theme) or empties it. *Reset all tiles to default* is in the same menu. |
-| **Files** | Full file manager. Browse the internal drive and USB drives, mark multiple items, copy, move, delete, rename and create folders with an on-screen keyboard, create and extract `.zip` files, view text/hex files and pictures (PNG, JPG, BMP, GIF, TGA), calculate folder sizes, and see properties and free space. Options opens the folder menu: search by name, sort (name/size/date), bookmarks and quick paths. Long jobs run in the background with a progress bar and can be cancelled. |
-| **Network** | **Web file manager** on port **8080**: open `http://<ps4-ip>:8080` in any browser to browse, download, upload (with a progress bar), make folders and delete. For FTP, use GoldHEN's own FTP server (port **2121**); OrbisKit doesn't run a second one. |
+| **Home** | Dashboard with server status, uptime, an installed-app summary and 8 quick-action tiles (2 rows of 4). X runs a tile. Triangle picks a tile's action from a list (servers, Files/Apps/Tools/Settings, USB, internal storage, `/data`, payloads, backups, capture sync, largest files, sandbox escape, next theme, music player, find leftovers, two-panel files) or empties it. *Reset all tiles to default* is in the same menu. |
+| **Files** | Full file manager. Browse the internal drive and USB drives, mark multiple items, copy, move, delete, rename and create folders with an on-screen keyboard, create and extract `.zip` files, view text/hex files and pictures (PNG, JPG, BMP, GIF, TGA), play music (MP3, FLAC, WAV, OGG, M4A) and videos (MP4), calculate folder sizes, and see properties and free space. Options opens the folder menu: search by name, sort (name/size/date), bookmarks and quick paths. Long jobs run in the background with a progress bar and can be cancelled. **Two-panel view** (R3, or the Options menu): two folders side by side; Left/Right picks the panel and Triangle copies or moves straight to the other one. |
+| **Network** | **Web file manager** on port **8080**: open `http://<ps4-ip>:8080` in any browser to browse, download, upload (with a progress bar), make folders and delete. Search the whole console (or `/user`, `/data`, a USB drive) by name, and browse the pictures on USB drives in the Gallery. For FTP, use GoldHEN's own FTP server (port **2121**); OrbisKit doesn't run a second one. |
 | **Payloads** | Lists `.bin` payloads found on USB (`/`, `/payloads`), in `/data/payloads` and in `/data/GoldHEN/payloads`, and sends them to GoldHEN's BinLoader (`127.0.0.1:9090`). Square marks one payload to be sent automatically every time the app starts. |
 | **System** | Firmware, live CPU and SoC temperatures, IP address, sandbox status, server status, free space on internal storage and USB drives, and uptime. |
-| **Tools** | Screenshot/video sync to `USB:/OrbisKit/captures` (skips files already copied), backup of the system databases (`app.db`, `addcont.db`, `av_content_bg.db`) to `USB:/OrbisKit/backup/`, backup of `/user/home` (saves, profile data) to USB, *Find largest files* (scans `/user` and lists the 200 biggest), a shortcut to the USB drive and sandbox escape retry. |
-| **Settings** | Start screen (the Home dashboard, or the tab and folder you used last), web server auto-start, and the colour theme. Changes are saved automatically to `/data/OrbisKit/settings.ini`. |
+| **Tools** | Screenshot/video sync to `USB:/OrbisKit/captures` (skips files already copied), backup of the system databases (`app.db`, `addcont.db`, `av_content_bg.db`) to `USB:/OrbisKit/backup/`, backup of `/user/home` (saves, profile data) to USB, *Find largest files* (scans `/user` and lists the 200 biggest), a shortcut to the USB drive and sandbox escape retry. **Find leftovers** lists `.pkg` files in `/data` and on USB whose game, update or DLC is already installed (same or newer version); mark the ones to delete. **Music player** opens the Now Playing screen. |
+| **Settings** | Start screen (the Home dashboard, or the tab and folder you used last), web server auto-start, the colour theme and the two-panel Files view. Changes are saved automatically to `/data/OrbisKit/settings.ini`. |
 
 **Apps tab:** every installed game/app with icon, title, ID, version, game/update/DLC size, and
 shortcuts to its folders. **Storage analyzer:** Files → Options → *Find largest files here*
@@ -55,6 +55,17 @@ as `log_prev.txt`.
 | Triangle | Choose tile action (Home) / actions menu (Files) / rescan (Payloads) |
 | Options | Folder menu: search, sort, bookmarks, quick paths |
 | L2 / R2 | Refresh the folder |
+| L3 | Files: sort by name / size / date / type. In search and "largest files" results: size, type, name, folder |
+| R3 | Files: one or two panels |
+| Touchpad | Music player (Now Playing) |
+
+### Music player
+
+Open an MP3, FLAC, WAV or OGG file in Files and the rest of the folder plays after it. The music keeps playing while you use the rest of the app. On the Now Playing screen: X pause, L1/R1 previous/next, Left/Right -10 s/+10 s, Up/Down volume, Square play mode (folder once, repeat all, repeat one, shuffle), Triangle stop, O hide. Volume and play mode are saved. M4A files play too.
+
+### Video player
+
+Open an MP4, M4V or MOV file in Files to play it full screen with sound: X pause, Left/Right -10 s/+10 s, L1/R1 -1 min/+1 min, Up/Down volume, Triangle info, O close. The picture is decoded by the PS4's video player (H.264); the sound (AAC, mono or stereo) is decoded by the app. The PS4's background-recording buffer in `/user/av_contents/content_tmp` is not a finished video and can't be played.
 
 ## Building (Windows)
 
@@ -134,8 +145,14 @@ send it with GoldHEN's remote package installer.
   sandbox escape.
 - [stb_image and stb_image_write](https://github.com/nothings/stb) by Sean Barrett (public domain /
   MIT): picture decoding, and zip compression and extraction.
+- [stb_vorbis](https://github.com/nothings/stb) by Sean Barrett (public domain / MIT): OGG Vorbis decoding.
+- [minimp4](https://github.com/lieff/minimp4) by Lion (CC0): MP4 reading for video sound.
+- Helix AAC decoder by RealNetworks (RPSL; copy from [codec-helix](https://github.com/pschatzmann/codec-helix)): AAC decoding for video sound.
+- [dr_mp3, dr_flac and dr_wav](https://github.com/mackron/dr_libs) by David Reid (public domain / MIT-0): MP3, FLAC and WAV decoding.
 
 ## License
 
-OrbisKit is released under the MIT License (see `LICENSE`). The stb libraries keep their own
-public-domain / MIT license.
+OrbisKit is released under the MIT License (see `LICENSE`). The stb, dr_libs and minimp4 libraries keep
+their own public-domain / MIT / MIT-0 / CC0 licenses. The Helix AAC decoder (`src/ext/helix-aac`) is
+under the RealNetworks Public Source License (RPSL); its source is included unchanged except
+for small glue headers.
