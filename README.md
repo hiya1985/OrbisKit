@@ -91,8 +91,10 @@ The version is set in one place: `$VERSION` in `build.ps1`.
 - `build.ps1` makes the full app package `IV0000-ORBK00001_00-ORBISKIT00000000.pkg`. To move to a
   new version, delete OrbisKit on the PS4 and install the new package. Settings in
   `/data/OrbisKit` are kept.
-- `build.ps1 -Patch` makes an update package (`...-update-X.YY.pkg`), but the Package Installer
-  currently refuses it ("unable to install"), so it isn't usable yet.
+- `build.ps1 -Patch` makes an update package (`...-update-X.YY.pkg`), but GoldHEN's Package Installer
+  refuses homebrew patches ("unable to install"), so it isn't usable. Tested every way — a newer
+  version, a clean `01.00` base, and both the `gp` and `gpe` categories — and all were rejected.
+  Updating means deleting the old app and installing the new full package.
 
 The full app and its updates share a fixed base version (`$MASTER_VER` = `01.00`). Don't change it,
 or updates stop matching the installed app.
@@ -113,6 +115,10 @@ are updated to match.
 Copy the `.pkg` to a USB drive, plug it into the PS4 and install it from
 *Settings > Debug Settings > Game > Package Installer* (GoldHEN must be loaded). You can also
 send it with GoldHEN's remote package installer.
+
+**Upgrading:** delete the installed OrbisKit first, then install the new package. The Package
+Installer won't lay a new version over an existing one, and GoldHEN doesn't accept update
+packages for homebrew. Your settings and data in `/data/OrbisKit` are kept across the reinstall.
 
 ## Notes
 
