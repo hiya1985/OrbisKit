@@ -16,7 +16,7 @@ Set-Location $PSScriptRoot
 $TITLE      = "OrbisKit"
 $TITLE_ID   = "ORBK00001"
 $CONTENT_ID = "IV0000-ORBK00001_00-ORBISKIT00000000"
-$VERSION    = "01.03"   # the ONLY place the version is set: also shown in the app (01.02 -> "v1.02")
+$VERSION    = "01.04"   # the ONLY place the version is set: also shown in the app (01.02 -> "v1.02")
 $MASTER_VER = "01.00"   # base (master) version: must stay the same in the app and all its updates
 if ($Ver) {             # one-off override, e.g. -Ver 01.01 (PowerShell names ignore case: not -Version)
     if ($Ver -notmatch '^\d\d\.\d\d$') { throw "-Ver must look like 01.01" }
