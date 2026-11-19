@@ -29,6 +29,7 @@
 #include "notify.h"
 #include "pad.h"
 #include "payload.h"
+#include "pkginst.h"
 #include "sysinfo.h"
 #include "video.h"
 #include "web.h"
@@ -76,7 +77,7 @@ enum {
     ACT_UNMARK, ACT_PROPS, ACT_SENDPAYLOAD, ACT_CLEARCLIP, ACT_RENAME, ACT_VIEW,
     ACT_VIEWIMG, ACT_EXTRACT, ACT_SEARCH, ACT_SIZE, ACT_SORT, ACT_BOOKMARK, ACT_UNBOOKMARK,
     ACT_ZIP, ACT_EDIT, ACT_HASH, ACT_BIGFILES,
-    ACT_PLAYVIDEO, ACT_PLAY, ACT_PLAYALL, ACT_NOWPLAYING, ACT_COPY2, ACT_MOVE2, ACT_DUAL, ACT_SAMEDIR, ACT_LO_DELETE,
+    ACT_PLAYVIDEO, ACT_PLAY, ACT_PLAYALL, ACT_NOWPLAYING, ACT_COPY2, ACT_MOVE2, ACT_DUAL, ACT_SAMEDIR, ACT_LO_DELETE, ACT_INSTALL,
     ACT_APPPATH, ACT_APPPATH_LAST = ACT_APPPATH + 4,   /* open app_paths[n] in Files */
     ACT_TILE_RESET,
     ACT_TILE_SET, ACT_TILE_SET_LAST = ACT_TILE_SET + 63, /* put quick action n on the selected tile */
@@ -592,6 +593,10 @@ static void do_action(int act)
         snprintf(info.lines[info.n++], 200, "Mode:     %o", e->mode & 07777);
         break;
     }
+    case ACT_INSTALL:
+        if (!br.count || br.e[br.sel].is_dir || !pkginst_is_pkg_name(br.e[br.sel].name)) break;
+        ask(ACT_INSTALL, "Install \"%s\"? Keep the file where it is until the install finishes.", br.e[br.sel].name);
+        break;
     case ACT_SENDPAYLOAD: {
         if (!br.count) break;
         char p[1024], err[160];
@@ -616,6 +621,13 @@ static void confirmed(int act)
         else toast(C_GREEN, "Deleted %d file(s), %s freed", d, a);
         if (lo_sel >= lo_count) lo_sel = lo_count ? lo_count - 1 : 0;
         browser_reload(&br);
+        return;
+    }
+    if (act == ACT_INSTALL) {
+        char p[1024], msg[200];
+        if (!br.count || path_join(p, sizeof p, br.path, br.e[br.sel].name)) return;
+        if (pkginst_install(p, msg, sizeof msg) == 0) toast(C_GREEN, "%s", msg);
+        else toast(C_RED, "%s", msg);
         return;
     }
     if (act == ACT_DELETE) {
@@ -708,6 +720,8 @@ static void open_file_menu(void)
         menu_add("Play video", ACT_PLAYVIDEO);
     if (br.count && !br.e[br.sel].is_dir && !marked && audio_is_audio_name(br.e[br.sel].name))
         menu_add("Play (and the rest of this folder)", ACT_PLAY);
+    if (br.count && !br.e[br.sel].is_dir && !marked && pkginst_is_pkg_name(br.e[br.sel].name))
+        menu_add("Install package", ACT_INSTALL);
     if (audio_active()) menu_add("Now playing...", ACT_NOWPLAYING);
     if (dual && br.count) {
         menu_add(marked ? "Copy marked to the other panel" : "Copy to the other panel", ACT_COPY2);
@@ -916,6 +930,8 @@ static void input_files(void)
             do_action(ACT_PLAYVIDEO);
         } else if (audio_is_audio_name(e->name)) {
             do_action(ACT_PLAY);
+        } else if (pkginst_is_pkg_name(e->name)) {
+            do_action(ACT_INSTALL);
         } else {
             open_file_menu();
         }
@@ -2418,6 +2434,23 @@ static void poll_status(void)
         if (frame % (60 * TEMP_STEP_S) == 0) sysinfo_temp_record(cpu_t, soc_t);
     }
     if (frame % 300 == 0) sysinfo_ip(ip, sizeof ip);
+
+    /* package installs started here or from the web page: say when each one ends */
+    if (frame % 120 == 0) {
+        static int reported[64], nrep;
+        PkgTask t[PKGINST_MAX];
+        int n = pkginst_tasks(t, PKGINST_MAX);
+        for (int i = 0; i < n; i++) {
+            if (!t[i].finished) continue;
+            int seen = 0;
+            for (int j = 0; j < nrep && !seen; j++) seen = reported[j] == t[i].task;
+            if (seen) continue;
+            reported[nrep++ % 64] = t[i].task;
+            if (nrep > 64) nrep = 64;
+            if (t[i].error) toast(C_RED, "Install of %s failed (0x%08X)", t[i].title, (unsigned)t[i].error);
+            else toast(C_GREEN, "Installed %s", t[i].title);
+        }
+    }
 
     /* storage: refresh every ~3 s, and right away when the Files folder changes */
     static char last_path[1024];

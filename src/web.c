@@ -13,6 +13,7 @@
 #include "hash.h"
 #include "jb.h"
 #include "payload.h"
+#include "pkginst.h"
 #include "sysinfo.h"
 #include <dirent.h>
 #include <errno.h>
@@ -475,7 +476,10 @@ static void send_listing(int s, const char *dir)
                       editable ? " <a href='/edit?p=" : "", editable ? enc : "", editable ? "' title=Edit>edit</a>" : "",
                       date, sz);
             }
-            sendf(s, "<td class=s><button class='d e' title=Rename onclick=\"ren('%s')\">&#9998;</button>"
+            sendf(s, "<td class=s>");
+            if (!isdir && pkginst_is_pkg_name(e->d_name))
+                sendf(s, "<button class='d e' title='Install on the PS4' onclick=\"inst('%s')\">&#128230;</button>", enc);
+            sendf(s, "<button class='d e' title=Rename onclick=\"ren('%s')\">&#9998;</button>"
                      "<button class=d title=Delete onclick=\"del('%s',%d)\">&#10005;</button></td></tr>",
                   enc, enc, isdir);
         }
@@ -492,6 +496,8 @@ static void send_listing(int s, const char *dir)
         ".then(()=>location.reload(),e=>alert(e))}"
         "function del(p,d){if(confirm('Delete '+decodeURIComponent(p)+(d?' and everything inside it':'')+'?'))"
         "post('/del?p='+p).then(()=>location.reload(),e=>alert(e))}"
+        "function inst(p){if(confirm('Install '+decodeURIComponent(p).split('/').pop()+' on the PS4? Keep the file there until it finishes.'))"
+        "post('/install?p='+p).then(t=>alert(t),e=>alert(e))}"
         "function ren(p){const old=decodeURIComponent(p).split('/').pop(),n=prompt('New name',old);"
         "if(n&&n!==old)post('/rename?p='+p+'&n='+encodeURIComponent(n)).then(()=>location.reload(),e=>alert(e))}"
         /* uploads: items are {file, dir} where dir is a relative sub-folder ('' = here) */
@@ -1734,6 +1740,11 @@ static void *conn_serve(void *arg)
         else if (k_lstat(dst, &st) == 0) reply_text(s, 409, "Conflict", "Something with that name already exists.");
         else if (rename(p, dst) == 0) { reply_text(s, 200, "OK", "Renamed"); wlog("Renamed %s -> %s", path_base(p), n); }
         else reply_text(s, 500, "Error", strerror(errno));
+    } else if (!strcmp(method, "POST") && !strcmp(target, "/install")) {
+        char msg[200];
+        if (!pkginst_is_pkg_name(p)) reply_text(s, 400, "Bad Request", "Not a .pkg file.");
+        else if (pkginst_install(p, msg, sizeof msg) == 0) { reply_text(s, 200, "OK", msg); wlog("Install started: %s", path_base(p)); }
+        else reply_text(s, 500, "Error", msg);
     } else if (!strcmp(method, "POST") && !strcmp(target, "/del")) {
         if (protected_path(p)) {
             reply_text(s, 403, "Forbidden", "That folder is protected.");

@@ -55,7 +55,7 @@ $cflags = @("--target=x86_64-pc-freebsd12-elf", "-fPIC", "-funwind-tables", "-O2
             ('-DAPP_VERSION=\"{0}\"' -f $VERSION.TrimStart('0')))   # \" survives PowerShell 5.1's argument passing
 $libs = @("-lc", "-lm", "-lkernel", "-lSceVideoOut", "-lSceUserService", "-lScePad",
           "-lSceNet", "-lSceNetCtl", "-lSceSystemService", "-lSceAudioOut",
-          "-lSceAvPlayer", "-lSceSysmodule")
+          "-lSceAvPlayer", "-lSceSysmodule", "-lSceBgft", "-lSceAppInstUtil")
 $libdirs = @("-L$TC\lib")
 
 if ($env:GOLDHEN_SDK) {

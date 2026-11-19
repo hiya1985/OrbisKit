@@ -27,3 +27,6 @@ const char *lo_type_name(int type);
 /* Deletes the marked files (each re-checked first). Returns how many were deleted;
  * *freed gets the bytes, err the last error. Removes them from the list. */
 int  lo_delete_marked(uint64_t *freed, char *err, int errn);
+/* Reads a .pkg header: content ID (37 bytes), content type, APP_VER ("01.05", 8 bytes) and,
+ * if title is not NULL, the TITLE from its param.sfo. 0 if it is a package we understand. */
+int  pkg_header(const char *path, char *cid, int *type, char *ver, char *title, int titlen);

@@ -42,10 +42,11 @@ static uint32_t be32(const unsigned char *p) { return (uint32_t)p[0] << 24 | p[1
 static uint32_t le32(const unsigned char *p) { return p[0] | p[1] << 8 | p[2] << 16 | (uint32_t)p[3] << 24; }
 static uint16_t le16(const unsigned char *p) { return p[0] | p[1] << 8; }
 
-/* APP_VER (preferred) or VERSION from a param.sfo image. */
-static void sfo_version(const unsigned char *s, size_t n, char *out)
+/* APP_VER (preferred) or VERSION from a param.sfo image, and TITLE if title is given. */
+static void sfo_read(const unsigned char *s, size_t n, char *out, char *title, int titlen)
 {
     out[0] = 0;
+    if (title && titlen > 0) title[0] = 0;
     if (n < 0x14 || memcmp(s, "\0PSF", 4)) return;
     uint32_t keys = le32(s + 8), data = le32(s + 12), cnt = le32(s + 16);
     char ver[8] = "";
@@ -57,10 +58,16 @@ static void sfo_version(const unsigned char *s, size_t n, char *out)
         if (ko >= n || dofs + 5 > n || len < 5) continue;
         const char *key = (const char *)s + ko;
         if (memchr(key, 0, n - ko) == NULL) continue;
-        if (!strcmp(key, "APP_VER")) { memcpy(out, s + dofs, 5); out[5] = 0; return; }
-        if (!strcmp(key, "VERSION")) { memcpy(ver, s + dofs, 5); ver[5] = 0; }
+        if (!strcmp(key, "APP_VER")) { memcpy(out, s + dofs, 5); out[5] = 0; }
+        else if (!strcmp(key, "VERSION")) { memcpy(ver, s + dofs, 5); ver[5] = 0; }
+        else if (title && titlen > 0 && !strcmp(key, "TITLE")) {
+            size_t m = len < (uint32_t)titlen ? len : (size_t)titlen - 1;
+            if (dofs + m > n) m = n - dofs;
+            memcpy(title, s + dofs, m);
+            title[m] = 0;
+        }
     }
-    snprintf(out, 8, "%s", ver);
+    if (!out[0]) snprintf(out, 8, "%s", ver);
 }
 
 static int read_at(int fd, uint64_t off, void *buf, size_t n)
@@ -70,8 +77,9 @@ static int read_at(int fd, uint64_t off, void *buf, size_t n)
 }
 
 /* Reads the header of a .pkg. 0 if it is a package we understand. */
-static int pkg_info(const char *path, char *cid, int *type, char *ver)
+int pkg_header(const char *path, char *cid, int *type, char *ver, char *title, int titlen)
 {
+    if (title && titlen > 0) title[0] = 0;
     int fd = open(path, O_RDONLY);
     if (fd < 0) return -1;
     unsigned char h[0x80];
@@ -89,7 +97,7 @@ static int pkg_info(const char *path, char *cid, int *type, char *ver)
         uint32_t off = be32(e + 0x10), size = be32(e + 0x14);
         if (size < 0x14 || size > 64 * 1024) break;
         unsigned char *s = malloc(size);
-        if (s && !read_at(fd, off, s, size)) sfo_version(s, size, ver);
+        if (s && !read_at(fd, off, s, size)) sfo_read(s, size, ver, title, titlen);
         free(s);
         break;
     }
@@ -109,7 +117,7 @@ static void installed_version(const char *tid, char *out)
     unsigned char buf[16384];
     ssize_t n = read(fd, buf, sizeof buf);
     close(fd);
-    if (n > 0) sfo_version(buf, (size_t)n, out);
+    if (n > 0) sfo_read(buf, (size_t)n, out, NULL, 0);
 }
 
 static int ver_num(const char *v)   /* "01.05" -> 105, -1 if not a version */
@@ -122,7 +130,7 @@ static void check_pkg(const char *path, uint64_t size)
 {
     char cid[40], ver[8], tid[10], label[17], inst[8] = "", p[160];
     int type;
-    if (pkg_info(path, cid, &type, ver) != 0) return;
+    if (pkg_header(path, cid, &type, ver, NULL, 0) != 0) return;
     pkgs++;
     if (strlen(cid) < 36) return;
     memcpy(tid, cid + 7, 9); tid[9] = 0;
